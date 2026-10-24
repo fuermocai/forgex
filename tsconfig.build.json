@@ -1,0 +1,22 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/models" },
+    { "path": "packages/security" },
+    { "path": "packages/devops" },
+    { "path": "packages/tools" },
+    { "path": "packages/core" },
+    { "path": "packages/workflows" },
+    { "path": "packages/sandbox" },
+    { "path": "packages/approval" },
+    { "path": "packages/integrations" },
+    { "path": "packages/observability" },
+    { "path": "packages/recovery" },
+    { "path": "packages/requirement-engine" },
+    { "path": "packages/autonomous" },
+    { "path": "packages/quality-gate" },
+    { "path": "packages/orchestrator" },
+    { "path": "apps/cli" }
+  ]
+}

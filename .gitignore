@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+*.log
+.forgex/
+benchmark/results/
+target/
+.DS_Store
+*.tsbuildinfo

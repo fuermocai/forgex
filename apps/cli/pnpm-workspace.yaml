@@ -1,0 +1,2 @@
+overrides:
+  '@forgex/cli': 'link:'

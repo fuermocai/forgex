@@ -1,0 +1,18 @@
+[package]
+name = "forgex-executor"
+version = "0.1.0"
+edition = "2021"
+description = "ForgeX 受控命令执行器：argv 直执行、超时与进程树终止、输出上限"
+license = "Apache-2.0"
+
+[lib]
+name = "forgex_executor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "forgex-executor"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,30 @@
+{
+  "name": "forgex",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "description": "ForgeX - enterprise-grade coding & DevOps agent runtime",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc -b tsconfig.build.json",
+    "clean": "tsc -b tsconfig.build.json --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "node tests/bench/run-bench.mjs",
+    "benchmark": "node benchmark/run-benchmark.mjs",
+    "cargo:build": "cargo build --release --manifest-path crates/executor/Cargo.toml",
+    "cargo:test": "cargo test --manifest-path crates/executor/Cargo.toml"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "@types/react": "18.3.12",
+    "tsup": "8.5.0",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}

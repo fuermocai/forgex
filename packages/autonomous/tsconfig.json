@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../shared" },
+    { "path": "../core" },
+    { "path": "../security" },
+    { "path": "../workflows" },
+    { "path": "../approval" },
+    { "path": "../recovery" },
+    { "path": "../observability" },
+    { "path": "../requirement-engine" }
+  ]
+}

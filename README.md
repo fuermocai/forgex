@@ -6,7 +6,54 @@
 
 ---
 
-## 快速开始
+## 安装
+
+前置：**Node.js >= 22**、**pnpm >= 9**（没有 pnpm 时安装器会用 corepack 自动启用）。Rust 执行器可选。
+
+### Windows
+
+```powershell
+git clone <仓库地址> E:\ForgeX
+cd E:\ForgeX
+powershell -ExecutionPolicy Bypass -File scripts\install-cli.ps1
+```
+
+安装器会做四件事：`pnpm install` → `pnpm build` → 生成 `forgex.cmd` / `forgex.ps1` / `forgex` 启动器 → 把启动器目录加入用户级 PATH。
+已装过时自动复用原启动器目录，不会产生两个 `forgex`。
+
+### macOS / Linux / WSL / Git Bash
+
+```bash
+git clone <仓库地址> ~/ForgeX
+cd ~/ForgeX
+bash scripts/install-cli.sh
+# 若提示目录不在 PATH，按提示把 export PATH 写入 ~/.bashrc 或 ~/.zshrc
+```
+
+### 验证
+
+```powershell
+forgex --version
+forgex doctor          # 环境自检
+```
+
+### 安装器参数
+
+| 参数 | 作用 |
+| --- | --- |
+| `-SkipInstall` / `--skip-install` | 跳过依赖安装，只重建启动器 |
+| `-SkipBuild` / `--skip-build` | 跳过编译 |
+| `-BinDir <目录>` / `FORGEX_BIN_DIR=<目录>` | 指定启动器位置 |
+| `-SkipPath` | 不修改 PATH |
+
+> 启动器记录的是仓库绝对路径；仓库移动位置后重新执行一次安装器即可（加 `-SkipInstall` 更快）。
+> 升级代码后同样执行 `-SkipBuild:$false` 或直接 `pnpm build`，启动器始终指向 `apps/cli/dist/main.js`。
+
+---
+
+## 快速开始（开发 / 二次开发）
+
+> 只是使用 CLI 的话，上面的「安装」已经完成构建；`forgex connect` 会自动生成配置文件，无需手写。
 
 前置：**Node.js >= 22**、**pnpm >= 9**。Rust 执行器可选（Rust stable）。
 
@@ -49,6 +96,21 @@ node apps/cli/dist/main.js doctor       # 环境自检
 node apps/cli/dist/main.js chat          # TUI 会话
 node apps/cli/dist/main.js run "为什么 8090 端口无法访问？" --yes
 ```
+
+### TUI 内命令
+
+`forgex`（无参数）直接进入 Ink TUI，所有日常操作都在会话内完成：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/models` | 列出可用模型并切换；`/models deepseek-v4-pro` 直接切 |
+| `/plan` | 计划模式开关：权限降为 `readonly` + 系统提示词追加"只输出计划"，退出时还原原权限 |
+| `/connect` | 会话内完成 Key 校验 → 持久化到用户环境变量 → 写配置 → 立即生效 |
+| `/context` | 当前上下文 token 估算 |
+| `/session` | 当前会话 id |
+| `/help` `/exit` | 帮助 / 退出 |
+
+模型切换只替换 Provider 与上下文预算，**会话历史、工具注册、权限策略全部保留**；`/connect` 的配置里只写 `apiKeyEnv` 引用，API Key 不明文落盘。
 
 ---
 
@@ -127,8 +189,8 @@ node apps/cli/dist/main.js run "为什么 8090 端口无法访问？" --yes
 ### 测试覆盖
 
 ```
-Test Files   58 passed
-Tests       772 passed    (v0.4.0: 693 → +79)
+Test Files   61 passed
+Tests       810 passed    (v0.5.0: 772 → +38)
 Duration    ~9s
 TypeScript  0 errors
 ```
@@ -144,7 +206,7 @@ forgex/
 │   ├── shared                        # 错误、日志、Token、脱敏、协议
 │   ├── models                        # OpenAI-compatible Provider + ModelRouter (v0.5)
 │   ├── security                      # Policy / Workspace / Command Guard、审批、审计
-│   ├── tools                         # 工具注册表 + 12 个内置工具
+│   ├── tools                         # 工具注册表 + 14 个内置工具
 │   ├── workflows                     # 状态机、流程注册、checkpoint
 │   ├── core                          # Agent Loop / Task Planner / Memory / Sub-Agent / Event Bus / Engineering Knowledge (v0.5)
 │   ├── sandbox                       # workspace / resource / capability
@@ -191,4 +253,4 @@ forgex/
 | v0.1.0 | 第一版 | 87 TS + 4 Rust | 模型接入 + Agent Loop + 工具 + 安全层 |
 | v0.3.0 | Task Planning + Sub-Agent + Project Memory | — | 计划器、子 Agent、结构化记忆 |
 | v0.4.0 | 稳态 | 693 全绿 | 全包构建 + 集成测试 + 基准 |
-| **v0.5.0** | **Autonomous Software Engineer** | **772 全绿** | 需求理解 · 自主执行 · 质量门禁 · 多模块协调 · 模型路由 · 工程知识 |
+| **v0.5.0** | **Autonomous Software Engineer** | **810 全绿** | 需求理解 · 自主执行 · 质量门禁 · 多模块协调 · 模型路由 · 工程知识 |
