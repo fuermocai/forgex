@@ -87,3 +87,7 @@ forgex config                   # 查看最终生效配置（Key 脱敏）
 
 - 仓库：<https://github.com/fuermocai/forgex>
 - 问题反馈：<https://github.com/fuermocai/forgex/issues>
+
+## License
+
+MIT

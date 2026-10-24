@@ -276,7 +276,7 @@ pnpm pack:npm:dry
 pnpm publish:npm
 ```
 
-> 当前仓库没有 `LICENSE` 文件；公开 npm 包建议先补一个（例如 MIT），否则用户在法律上并未获得使用许可。
+> 项目采用 MIT License，见仓库根目录 `LICENSE`。
 
 ---
 

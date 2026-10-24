@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "ForgeX - enterprise-grade coding & DevOps agent runtime",
+  "license": "MIT",
   "engines": {
     "node": ">=22.0.0",
     "pnpm": ">=9.0.0"

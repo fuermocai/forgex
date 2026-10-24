@@ -29,6 +29,7 @@ const manifest = {
   name: packageName,
   version,
   description: 'ForgeX - TUI-first coding & DevOps agent runtime',
+  license: 'MIT',
   type: 'module',
   main: './main.js',
   exports: {
