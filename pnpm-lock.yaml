@@ -26,9 +26,6 @@ importers:
 
   apps/cli:
     dependencies:
-      '@forgex/cli':
-        specifier: 'link:'
-        version: 'link:'
       '@forgex/core':
         specifier: workspace:*
         version: link:../../packages/core

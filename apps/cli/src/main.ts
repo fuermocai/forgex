@@ -22,8 +22,7 @@ import { toolsCommand } from './commands/tools.js';
 import { sessionsCommand } from './commands/sessions.js';
 import { configCommand } from './commands/config.js';
 import { connectCommand } from './commands/connect.js';
-
-const VERSION = '0.5.0';
+import { VERSION } from './version.js';
 
 async function main(argv: string[]): Promise<number> {
   const args = parseArgs(argv);

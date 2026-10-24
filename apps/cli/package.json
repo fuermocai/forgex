@@ -13,7 +13,6 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@forgex/cli": "link:",
     "@forgex/core": "workspace:*",
     "@forgex/devops": "workspace:*",
     "@forgex/models": "workspace:*",
