@@ -366,6 +366,46 @@ describe('安全链路', () => {
   });
 });
 
+describe('计划模式', () => {
+  it('开启后追加规划提示、权限降为 readonly，写操作被拒绝；关闭后恢复', async () => {
+    fake = await startFakeModel((_body, index) => {
+      if (index === 0) {
+        return {
+          toolCalls: [
+            toolCall('call_plan', 'edit_file', {
+              path: 'a.ts',
+              oldText: 'answer = 42',
+              newText: 'answer = 43',
+            }),
+          ],
+        };
+      }
+      const content = lastToolContent(fake!.requests[index]);
+      return { content: content.includes('POLICY_DENIED') ? '写操作被计划模式拒绝' : content };
+    });
+
+    const fixture = createAgent({ baseUrl: fake.baseUrl, approve: true });
+    fixture.agent.setPlanMode(true);
+
+    expect(fixture.agent.isPlanMode).toBe(true);
+    expect(fixture.agent.permissionMode).toBe('readonly');
+    expect(fixture.events.some((event) => event.type === 'notice' && event.message.includes('计划模式'))).toBe(true);
+
+    const result = await fixture.agent.run('把 answer 改成 43');
+    expect(result.text).toContain('拒绝');
+    expect(await readFile(join(root, 'a.ts'), 'utf8')).toContain('answer = 42');
+    // 计划模式在策略层直接拒绝，不应进入人工审批
+    expect(result.metrics.approvals).toBe(0);
+    expect(fake.requests[0]!.messages[0]!.content).toContain('计划模式');
+    expect(fixture.agent.contextTokens()).toBeGreaterThan(0);
+
+    fixture.agent.setPlanMode(false);
+    expect(fixture.agent.isPlanMode).toBe(false);
+    expect(fixture.agent.permissionMode).toBe('standard');
+    assertProtocolComplete(result, fixture);
+  });
+});
+
 describe('循环与取消', () => {
   it('连续相同工具调用触发循环检测，终止后仍补齐 tool 结果', async () => {
     fake = await startFakeModel((_body, index) => {

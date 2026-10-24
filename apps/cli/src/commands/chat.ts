@@ -46,6 +46,9 @@ export async function chatCommand(args: ParsedArgs, options: { cwd: string }): P
       runtime,
       bridge,
     }),
+    // Ctrl+C 交给 App 处理：运行中先取消任务，空闲时再退出；
+    // Ink 默认会在 Ctrl+C 时直接卸载，导致“取消任务”永远无法触发。
+    { exitOnCtrlC: false },
   );
 
   await app.waitUntilExit();

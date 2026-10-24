@@ -11,9 +11,13 @@ import {
   maskKey,
   readExistingConfig,
   resolveProvider,
+  saveConnectionConfig,
+  testConnectivity,
   writeModelSelection,
 } from '../src/runtime/connect-core.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -127,5 +131,100 @@ describe('配置读写', () => {
         maxOutputTokens: 256,
       }),
     ).toBe(false);
+  });
+});
+
+describe('testConnectivity', () => {
+  async function withServer(
+    handler: Parameters<typeof createServer>[1],
+    run: (baseUrl: string) => Promise<void>,
+  ): Promise<void> {
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      await run(`http://127.0.0.1:${port}/v1`);
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      });
+    }
+  }
+
+  it('成功响应返回 ok 与延迟', async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'pong' } }] }));
+      },
+      async (baseUrl) => {
+        const result = await testConnectivity({ baseUrl, apiKey: 'sk-test', model: 'fake-model' });
+        expect(result.ok).toBe(true);
+        expect(result.reason).toBe('ok');
+        expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+      },
+    );
+  });
+
+  it('401 返回 HTTP 状态与错误详情', async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(401, { 'content-type': 'application/json', connection: 'close' });
+        res.end(JSON.stringify({ error: { message: 'invalid api key' } }));
+      },
+      async (baseUrl) => {
+        const result = await testConnectivity({ baseUrl, apiKey: 'sk-bad', model: 'fake-model' });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('HTTP 401');
+        expect(result.detail).toBe('invalid api key');
+      },
+    );
+  });
+
+  it('非 JSON 响应返回可读错误', async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain', connection: 'close' });
+        res.end('not-json');
+      },
+      async (baseUrl) => {
+        const result = await testConnectivity({ baseUrl, apiKey: 'sk-test', model: 'fake-model' });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('响应无法解析');
+        expect(result.detail).toContain('not-json');
+      },
+    );
+  });
+});
+
+describe('saveConnectionConfig', () => {
+  it('创建目录并写入新配置，保留安全/会话/Agent 段', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'forgex-save-connect-'));
+    try {
+      const path = join(dir, 'nested', 'config.json');
+      const existing = readExistingConfig(path);
+      saveConnectionConfig(path, existing, {
+        baseUrl: 'https://api.deepseek.com',
+        model: 'deepseek-flash',
+        envName: 'DEEPSEEK_API_KEY',
+        contextWindow: 1_000_000,
+        maxOutputTokens: 8192,
+      });
+
+      const written = JSON.parse(await readFile(path, 'utf8')) as Record<string, any>;
+      expect(written.model).toMatchObject({
+        baseUrl: 'https://api.deepseek.com',
+        model: 'deepseek-flash',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        contextWindow: 1_000_000,
+        maxOutputTokens: 8192,
+      });
+      expect(written.security.mode).toBe('standard');
+      expect(written.session.dbPath).toBe(join('.forgex', 'sessions.db'));
+      expect(written.agent.maxIterations).toBe(12);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

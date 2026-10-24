@@ -189,8 +189,8 @@ node apps/cli/dist/main.js run "为什么 8090 端口无法访问？" --yes
 ### 测试覆盖
 
 ```
-Test Files   61 passed
-Tests       810 passed    (v0.5.0: 772 → +38)
+Test Files   62 passed
+Tests       817 passed    (v0.5.0: 772 → +45)
 Duration    ~9s
 TypeScript  0 errors
 ```
@@ -253,4 +253,4 @@ forgex/
 | v0.1.0 | 第一版 | 87 TS + 4 Rust | 模型接入 + Agent Loop + 工具 + 安全层 |
 | v0.3.0 | Task Planning + Sub-Agent + Project Memory | — | 计划器、子 Agent、结构化记忆 |
 | v0.4.0 | 稳态 | 693 全绿 | 全包构建 + 集成测试 + 基准 |
-| **v0.5.0** | **Autonomous Software Engineer** | **810 全绿** | 需求理解 · 自主执行 · 质量门禁 · 多模块协调 · 模型路由 · 工程知识 |
+| **v0.5.0** | **Autonomous Software Engineer** | **817 全绿** | 需求理解 · 自主执行 · 质量门禁 · 多模块协调 · 模型路由 · 工程知识 |
