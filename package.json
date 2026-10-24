@@ -11,6 +11,10 @@
   "packageManager": "pnpm@11.20.0",
   "scripts": {
     "build": "tsc -b tsconfig.build.json",
+    "build:npm": "pnpm build && tsup --config tsup.npm.config.ts && node scripts/prepare-npm.mjs",
+    "pack:npm": "pnpm build:npm && npm pack ./dist-npm",
+    "pack:npm:dry": "pnpm build:npm && npm pack ./dist-npm --dry-run",
+    "publish:npm": "pnpm build:npm && npm publish ./dist-npm --access public",
     "typecheck": "tsc -b tsconfig.build.json",
     "clean": "tsc -b tsconfig.build.json --clean",
     "test": "vitest run",

@@ -8,9 +8,23 @@
 
 ## 安装
 
-前置：**Node.js >= 22**、**pnpm >= 9**（没有 pnpm 时安装器会用 corepack 自动启用）。Rust 执行器可选。
+### 方式一：npm 全局安装（推荐）
 
-### Windows
+要求 **Node.js >= 22.13**（CLI 使用内置 `node:sqlite`）。
+
+```bash
+npm install -g @forgex/cli
+forgex --version
+```
+
+> `@forgex/cli` 是单文件 bundle，运行时只依赖 `ink` / `react` / `ssh2`，不需要克隆仓库。
+> 如果该包尚未发布，请使用下面的源码安装。
+
+### 方式二：源码安装
+
+源码安装需要 **Node.js >= 22**、**pnpm >= 9**（没有 pnpm 时安装器会用 corepack 自动启用）。Rust 执行器可选。
+
+#### Windows
 
 ```powershell
 git clone <仓库地址> E:\ForgeX
@@ -21,7 +35,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install-cli.ps1
 安装器会做四件事：`pnpm install` → `pnpm build` → 生成 `forgex.cmd` / `forgex.ps1` / `forgex` 启动器 → 把启动器目录加入用户级 PATH。
 已装过时自动复用原启动器目录，不会产生两个 `forgex`。
 
-### macOS / Linux / WSL / Git Bash
+#### macOS / Linux / WSL / Git Bash
 
 ```bash
 git clone <仓库地址> ~/ForgeX
@@ -233,6 +247,36 @@ forgex/
 - [安全设计](docs/SECURITY.md)
 - [架构设计](docs/ARCHITECTURE.md)
 - [开发指南](docs/DEVELOPMENT.md)
+
+---
+
+## 发布到 npm（维护者）
+
+npm 包名为 `@forgex/cli`，发布的是 `dist-npm/` 单文件 bundle，不会发布 `packages/*` 私有包。
+
+```bash
+# 1. 登录 npm（需要拥有 @forgex scope；当前 registry 上该 scope 属于 ikaka）
+npm login
+npm whoami
+
+# 2. 本地构建并检查包内容
+pnpm pack:npm:dry
+
+# 3. 发布（如开启 2FA，npm 会提示输入 OTP）
+pnpm publish:npm
+```
+
+版本号唯一来源是 `apps/cli/src/version.ts`，发布前先改这里并提交。`dist-npm/` 与 `*.tgz` 已加入 `.gitignore`。
+
+如果 `@forgex` scope 不属于当前 npm 账号，可改用其他包名重新生成：
+
+```powershell
+$env:FORGEX_NPM_PACKAGE = "@your-scope/forgex"
+pnpm pack:npm:dry
+pnpm publish:npm
+```
+
+> 当前仓库没有 `LICENSE` 文件；公开 npm 包建议先补一个（例如 MIT），否则用户在法律上并未获得使用许可。
 
 ---
 
