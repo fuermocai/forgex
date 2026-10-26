@@ -43,6 +43,8 @@ forgex
 
 任务运行中按 `Ctrl+C` 取消任务；空闲时按 `Ctrl+C` 退出。审批面板中按 `Ctrl+C` 视为拒绝。
 
+输入框编辑：`←`/`→` 移动光标，`Backspace`/`Delete` 删除光标前一个字符，`Ctrl+A`/`Ctrl+E` 跳到行首/行尾，`Ctrl+U` 清空整行。
+
 ## CLI 子命令
 
 ```bash

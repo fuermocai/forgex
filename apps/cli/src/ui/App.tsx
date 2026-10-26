@@ -21,6 +21,7 @@ import type { ForgeRuntime } from '../runtime/create-runtime.js';
 import { switchModel as applyModelSwitch } from '../runtime/model-switch.js';
 import { VERSION } from '../version.js';
 import type { ApprovalBridge } from './approval-bridge.js';
+import { applyInputKey, type EditKeyState } from './input-edit.js';
 import {
   MODEL_PRESETS,
   PROVIDERS,
@@ -463,53 +464,12 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
   /* ---------------- 输入编辑 ---------------- */
 
   const editInput = useCallback(
-    (char: string, key: { leftArrow: boolean; rightArrow: boolean; backspace: boolean; delete: boolean; ctrl: boolean; meta: boolean; tab: boolean; escape: boolean; upArrow: boolean; downArrow: boolean }): boolean => {
-      const chars = Array.from(input);
-      const at = Math.min(cursor, chars.length);
-
-      if (key.leftArrow) {
-        setCursor(Math.max(0, at - 1));
-        return true;
-      }
-      if (key.rightArrow) {
-        setCursor(Math.min(chars.length, at + 1));
-        return true;
-      }
-      if (key.ctrl && (char === 'a' || char === 'A')) {
-        setCursor(0);
-        return true;
-      }
-      if (key.ctrl && (char === 'e' || char === 'E')) {
-        setCursor(chars.length);
-        return true;
-      }
-      if (key.backspace) {
-        if (at > 0) {
-          chars.splice(at - 1, 1);
-          setInput(chars.join(''));
-          setCursor(at - 1);
-        }
-        return true;
-      }
-      if (key.delete) {
-        if (at < chars.length) {
-          chars.splice(at, 1);
-          setInput(chars.join(''));
-        }
-        return true;
-      }
-      if (key.ctrl || key.meta || key.tab || key.escape || key.upArrow || key.downArrow) {
-        return true;
-      }
-      if (char) {
-        const clean = char.replace(/[\r\n]+/g, ' ');
-        if (!clean) return true;
-        chars.splice(at, 0, clean);
-        setInput(chars.join(''));
-        setCursor(at + Array.from(clean).length);
-        return true;
-      }
-      return false;
+    (char: string, key: EditKeyState): boolean => {
+      const next = applyInputKey({ text: input, cursor }, char, key);
+      if (!next) return false;
+      if (next.text !== input) setInput(next.text);
+      if (next.cursor !== cursor) setCursor(next.cursor);
+      return true;
     },
     [cursor, input],
   );
