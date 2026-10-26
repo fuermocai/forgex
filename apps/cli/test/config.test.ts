@@ -98,6 +98,65 @@ describe('loadConfig', () => {
     expect(loaded.modelConfigured).toBe(true);
   });
 
+  it('只设置 DEEPSEEK_API_KEY 时自动识别 DeepSeek 预设', () => {
+    const loaded = loadConfig({
+      cwd: dir,
+      env: { DEEPSEEK_API_KEY: 'sk-deepseek' },
+      skipGlobal: true,
+      logger: silent,
+    });
+
+    expect(loaded.modelConfigured).toBe(true);
+    expect(loaded.config.model.baseUrl).toBe('https://api.deepseek.com');
+    expect(loaded.config.model.model).toBe('deepseek-flash');
+    expect(loaded.config.model.apiKey).toBe('sk-deepseek');
+    expect(loaded.config.model.contextWindow).toBe(1_000_000);
+    expect(loaded.sources).toContain('环境变量（自动识别 Provider）');
+  });
+
+  it('自动识别不会覆盖显式环境变量配置', () => {
+    const loaded = loadConfig({
+      cwd: dir,
+      env: { OPENAI_API_KEY: 'sk-openai', FORGEX_MODEL: 'my-model', FORGEX_BASE_URL: 'https://custom.example' },
+      skipGlobal: true,
+      logger: silent,
+    });
+
+    expect(loaded.config.model.baseUrl).toBe('https://custom.example');
+    expect(loaded.config.model.model).toBe('my-model');
+    expect(loaded.config.model.apiKey).toBeUndefined();
+    expect(loaded.sources).not.toContain('环境变量（自动识别 Provider）');
+  });
+
+  it('配置文件已指定模型时不做环境变量推断', async () => {
+    await writeFile(
+      join(dir, 'forgex.config.json'),
+      JSON.stringify({ model: { baseUrl: 'https://a.example', model: 'a', apiKeyEnv: 'DEEPSEEK_API_KEY' } }),
+      'utf8',
+    );
+
+    const loaded = loadConfig({
+      cwd: dir,
+      env: { OPENAI_API_KEY: 'sk-openai', DEEPSEEK_API_KEY: 'sk-deepseek' },
+      skipGlobal: true,
+      logger: silent,
+    });
+
+    expect(loaded.config.model.baseUrl).toBe('https://a.example');
+    expect(loaded.config.model.model).toBe('a');
+    expect(loaded.sources).not.toContain('环境变量（自动识别 Provider）');
+  });
+
+  it('API Key 环境变量为空字符串时不算已配置', () => {
+    const loaded = loadConfig({
+      cwd: dir,
+      env: { DEEPSEEK_API_KEY: '   ' },
+      skipGlobal: true,
+      logger: silent,
+    });
+    expect(loaded.modelConfigured).toBe(false);
+  });
+
   it('展开 ~ 路径', async () => {
     await writeFile(
       join(dir, 'forgex.config.json'),

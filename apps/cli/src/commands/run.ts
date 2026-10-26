@@ -16,6 +16,7 @@ import { ForgeError, type AgentEvent } from '@forgex/shared';
 import type { ApprovalHandler } from '@forgex/security';
 import { flagBool, flagString, type ParsedArgs } from '../args.js';
 import { loadConfig } from '../config/load-config.js';
+import { modelSetupHint } from '../config/setup-hint.js';
 import { createRuntime } from '../runtime/create-runtime.js';
 
 export async function runCommand(args: ParsedArgs, options: { cwd: string }): Promise<number> {
@@ -24,10 +25,7 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
     ...(flagString(args.flags, 'config') ? { configPath: flagString(args.flags, 'config')! } : {}),
   });
   if (!loaded.modelConfigured) {
-    throw new ForgeError(
-      'CONFIG_INVALID',
-      '尚未配置模型。请创建 forgex.config.json 或设置 FORGEX_BASE_URL / FORGEX_MODEL。',
-    );
+    throw new ForgeError('CONFIG_INVALID', modelSetupHint({ interactive: false }));
   }
 
   const prompt = (args.positionals.join(' ').trim() || (await readStdin())).trim();

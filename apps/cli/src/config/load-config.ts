@@ -16,6 +16,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { ForgeError, createLogger, type Logger, type RemoteHostConfig } from '@forgex/shared';
 import type { ModelConfig } from '@forgex/models';
+import { PROVIDERS } from './providers.js';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8000/v1';
 const DEFAULT_MODEL = 'local-model';
@@ -152,7 +153,12 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   const envData = readEnvConfig(env);
   if (Object.keys(envData).length > 0) sources.push('环境变量');
 
-  const merged = deepMerge(fileData, envData);
+  // 完全没有模型配置、但存在常见 API Key 环境变量时，直接按 Provider 预设补齐：
+  // `export DEEPSEEK_API_KEY=...` 后无需再手写配置文件即可运行。
+  const detected = detectProviderFromEnv(env, fileData);
+  if (detected) sources.push('环境变量（自动识别 Provider）');
+
+  const merged = deepMerge(deepMerge(fileData, detected ?? {}), envData);
   const parsed = ConfigSchema.safeParse(merged);
   if (!parsed.success) {
     const issues = parsed.error.issues
@@ -292,8 +298,46 @@ function readEnvConfig(env: NodeJS.ProcessEnv): Record<string, unknown> {
   return out;
 }
 
-/** 判断模型是否被显式配置（而不是落到默认占位值） */
-function determineModelConfigured(
+/**
+ * 无显式模型配置时，按 API Key 环境变量推断 Provider。
+ *
+ * 只在「配置文件和环境变量都没有给出 baseUrl / model / key」时生效，
+ * 命中后沿用 Provider 预设的 baseUrl、模型名与上下文预算，
+ * 让 `export DEEPSEEK_API_KEY=... && forgex` 这种最小配置可以直接跑起来。
+ */
+function detectProviderFromEnv(
+  env: NodeJS.ProcessEnv,
+  fileData: Record<string, unknown>,
+): Record<string, unknown> | null {
+  // 任一显式配置存在，就尊重用户的选择，不做猜测
+  if (env.FORGEX_BASE_URL || env.FORGEX_MODEL || env.FORGEX_API_KEY || env.FORGEX_API_KEY_ENV) {
+    return null;
+  }
+  const fileModel = fileData.model;
+  if (isRecord(fileModel)) {
+    if (typeof fileModel.baseUrl === 'string' || typeof fileModel.model === 'string') return null;
+    if (typeof fileModel.apiKey === 'string' || typeof fileModel.apiKeyEnv === 'string') return null;
+  }
+
+  for (const preset of Object.values(PROVIDERS)) {
+    // FORGEX_API_KEY 属于显式配置，已在上面返回
+    if (preset.apiKeyEnv === 'FORGEX_API_KEY') continue;
+    const key = env[preset.apiKeyEnv];
+    if (!key || key.trim() === '') continue;
+    return {
+      model: {
+        baseUrl: preset.defaultBaseUrl,
+        model: preset.defaultModel,
+        apiKeyEnv: preset.apiKeyEnv,
+        contextWindow: preset.contextWindow,
+        maxOutputTokens: preset.maxOutputTokens,
+      },
+    };
+  }
+  return null;
+}
+
+/** 判断模型是否被显式配置（而不是落到默认占位值） */function determineModelConfigured(
   fileData: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
   parsed: z.output<typeof ConfigSchema>,

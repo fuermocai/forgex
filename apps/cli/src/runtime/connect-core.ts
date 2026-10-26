@@ -13,54 +13,13 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 /* ------------------------------------------------------------------ */
-/* Provider 预设                                                       */
+/* Provider 预设（定义在 config/providers，这里保留 re-export）          */
 /* ------------------------------------------------------------------ */
 
-export interface ProviderPreset {
-  name: string;
-  defaultBaseUrl: string;
-  defaultModel: string;
-  apiKeyEnv: string;
-  contextWindow: number;
-  maxOutputTokens: number;
-}
+import { PROVIDERS, PROVIDERS_KEYS, type ProviderPreset } from '../config/providers.js';
 
-export const PROVIDERS: Record<string, ProviderPreset> = {
-  deepseek: {
-    name: 'DeepSeek',
-    defaultBaseUrl: 'https://api.deepseek.com',
-    defaultModel: 'deepseek-flash',
-    apiKeyEnv: 'DEEPSEEK_API_KEY',
-    contextWindow: 1_000_000,
-    maxOutputTokens: 8192,
-  },
-  qwen: {
-    name: 'Qwen (DashScope compatible-mode)',
-    defaultBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    defaultModel: 'qwen-plus',
-    apiKeyEnv: 'DASHSCOPE_API_KEY',
-    contextWindow: 131_072,
-    maxOutputTokens: 8192,
-  },
-  openai: {
-    name: 'OpenAI',
-    defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultModel: 'gpt-4o-mini',
-    apiKeyEnv: 'OPENAI_API_KEY',
-    contextWindow: 128_000,
-    maxOutputTokens: 16_384,
-  },
-  custom: {
-    name: '自定义兼容端点（vLLM / Ollama / 内网网关）',
-    defaultBaseUrl: 'http://127.0.0.1:8000/v1',
-    defaultModel: 'local-model',
-    apiKeyEnv: 'FORGEX_API_KEY',
-    contextWindow: 32_768,
-    maxOutputTokens: 4096,
-  },
-};
-
-export const PROVIDERS_KEYS = Object.keys(PROVIDERS);
+export { PROVIDERS, PROVIDERS_KEYS };
+export type { ProviderPreset };
 
 /** 把用户输入（编号 / 名称 / 空）解析为 provider key */
 export function resolveProvider(input: string): string {

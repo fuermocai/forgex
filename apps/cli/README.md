@@ -18,14 +18,25 @@ forgex --version
 ## 快速开始
 
 ```bash
-# 配置模型 API Key（会做一次连通性测试）
-forgex connect
-
-# 在当前目录启动 TUI
+# 方式一：直接启动。首次运行会自动进入连接向导（provider → baseUrl → API Key → model）
 forgex
+
+# 方式二：先单独配置，会做一次连通性测试
+forgex connect
 ```
 
 首次运行会在 `~/.forgex/config.json` 生成配置。API Key 不写入配置文件，而是保存到环境变量（Windows 用户级环境变量；Unix 会提示 export 命令）。
+
+如果只想用环境变量，也可以完全不建配置文件——启动时会按 Key 自动识别 Provider：
+
+```bash
+export DEEPSEEK_API_KEY=sk-xxx   # 自动使用 https://api.deepseek.com + deepseek-flash
+forgex
+
+# 也支持 DASHSCOPE_API_KEY / OPENAI_API_KEY
+# 自定义端点仍用 FORGEX_BASE_URL / FORGEX_MODEL / FORGEX_API_KEY（或 forgex connect）
+```
+
 
 ## TUI 命令
 
