@@ -13,11 +13,11 @@
 要求 **Node.js >= 22.13**（CLI 使用内置 `node:sqlite`）。
 
 ```bash
-npm install -g @forgex/cli
+npm install -g forgex-agent
 forgex --version
 ```
 
-> `@forgex/cli` 是单文件 bundle，运行时只依赖 `ink` / `react` / `ssh2`，不需要克隆仓库。
+> `forgex-agent` 是单文件 bundle，运行时只依赖 `ink` / `react` / `ssh2`，不需要克隆仓库。
 > 如果该包尚未发布，请使用下面的源码安装。
 
 ### 方式二：源码安装
@@ -252,10 +252,10 @@ forgex/
 
 ## 发布到 npm（维护者）
 
-npm 包名为 `@forgex/cli`，发布的是 `dist-npm/` 单文件 bundle，不会发布 `packages/*` 私有包。
+npm 包名为 `forgex-agent`，发布的是 `dist-npm/` 单文件 bundle，不会发布 `packages/*` 私有包。
 
 ```bash
-# 1. 登录 npm（需要拥有 @forgex scope；当前 registry 上该 scope 属于 ikaka）
+# 1. 登录 npm（当前账号 fuermocai 即可；forgex-agent 是未占用的裸包名，不需要 scope）
 npm login
 npm whoami
 
@@ -268,7 +268,7 @@ pnpm publish:npm
 
 版本号唯一来源是 `apps/cli/src/version.ts`，发布前先改这里并提交。`dist-npm/` 与 `*.tgz` 已加入 `.gitignore`。
 
-如果 `@forgex` scope 不属于当前 npm 账号，可改用其他包名重新生成：
+如果 `forgex-agent` 已被占用，可改用其他包名重新生成：
 
 ```powershell
 $env:FORGEX_NPM_PACKAGE = "@your-scope/forgex"

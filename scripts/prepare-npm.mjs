@@ -22,7 +22,7 @@ if (!existsSync(join(outDir, 'main.js'))) {
   throw new Error('dist-npm/main.js 不存在，请先运行 tsup --config tsup.npm.config.ts');
 }
 
-const packageName = process.env.FORGEX_NPM_PACKAGE ?? '@forgex/cli';
+const packageName = process.env.FORGEX_NPM_PACKAGE ?? 'forgex-agent';
 const repositoryUrl = 'https://github.com/fuermocai/forgex';
 
 const manifest = {
@@ -36,7 +36,7 @@ const manifest = {
     '.': './main.js',
   },
   bin: {
-    forgex: './main.js',
+    forgex: 'main.js',
   },
   files: ['main.js', 'README.md'],
   engines: {

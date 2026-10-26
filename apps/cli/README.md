@@ -11,7 +11,7 @@ TUI-first 的 Coding + DevOps Agent。用自然语言让 Agent 读代码、改�
 ## 安装
 
 ```bash
-npm install -g @forgex/cli
+npm install -g forgex-agent
 forgex --version
 ```
 
