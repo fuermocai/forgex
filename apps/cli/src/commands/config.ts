@@ -11,6 +11,7 @@ export function configCommand(args: ParsedArgs, options: { cwd: string }): numbe
   const loaded = loadConfig({
     cwd: options.cwd,
     ...(flagString(args.flags, 'config') ? { configPath: flagString(args.flags, 'config')! } : {}),
+    ...(flagString(args.flags, 'mode') ? { permissionMode: flagString(args.flags, 'mode')! } : {}),
   });
   const { apiKey, ...safeModel } = loaded.config.model;
 

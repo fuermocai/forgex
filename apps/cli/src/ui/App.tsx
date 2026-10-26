@@ -23,6 +23,12 @@ import { VERSION } from '../version.js';
 import type { ApprovalBridge } from './approval-bridge.js';
 import { applyInputKey, type EditKeyState } from './input-edit.js';
 import {
+  nextPermissionMode,
+  parsePermissionMode,
+  permissionModeHelp,
+  permissionModeList,
+} from '../config/permission-mode.js';
+import {
   MODEL_PRESETS,
   PROVIDERS,
   PROVIDERS_KEYS,
@@ -78,6 +84,7 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 
 const COMMANDS = [
   { name: '/models', desc: '切换模型（保留会话历史）' },
+  { name: '/mode', desc: '切换权限模式（readonly/standard/trusted/yolo）' },
   { name: '/plan', desc: '计划模式：只读，只出方案不改代码' },
   { name: '/connect', desc: '连接模型 / 更新 API Key' },
   { name: '/context', desc: '查看上下文 token 用量' },
@@ -89,6 +96,7 @@ const COMMANDS = [
 const HELP = [
   '命令',
   '  /models   切换模型（会话历史保留）',
+  '  /mode     查看或切换权限模式：/mode standard、/mode plan、/mode agent',
   '  /plan     进入/退出计划模式（只读，只出计划不改代码）',
   '  /connect  连接模型：校验 Key、持久化并立即生效',
   '  /context  显示上下文 token 估算',
@@ -97,6 +105,7 @@ const HELP = [
   '  /exit     退出',
   '',
   '快捷键',
+  '  Shift+Tab 循环权限模式（计划模式下则退出计划模式）',
   '  ↑/↓       在命令面板中选择',
   '  Tab       补全命令',
   '  ←/→       移动光标',
@@ -353,6 +362,24 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
     [finishConnect, push, switchModel, wizard],
   );
 
+  /* ---------------- 权限模式 ---------------- */
+
+  /**
+   * Shift+Tab：循环权限模式。
+   *
+   * 处于计划模式时先退出计划模式，回到进入前的权限；而不是在 readonly 上继续叠一层——
+   * 否则用户按一下看到 readonly→standard 变化、再按又回到 readonly，容易误判"没生效"。
+   */
+  const cyclePermissionMode = useCallback(() => {
+    if (agent.isPlanMode) {
+      agent.setPlanMode(false);
+    } else {
+      agent.setPermissionMode(nextPermissionMode(agent.permissionMode));
+    }
+    setPlanMode(agent.isPlanMode);
+    setMode(agent.permissionMode);
+  }, [agent]);
+
   /* ---------------- 斜杠命令 ---------------- */
 
   const handleSlash = useCallback(
@@ -385,6 +412,39 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
           const next = !agent.isPlanMode;
           agent.setPlanMode(next);
           setPlanMode(next);
+          setMode(agent.permissionMode);
+          return;
+        }
+        case '/mode': {
+          if (busy) {
+            push('notice', '当前任务运行中，结束或 Ctrl+C 取消后再切换权限模式');
+            return;
+          }
+          // 不带参数：打印模式清单与当前值
+          if (!arg) {
+            push('notice', permissionModeHelp(agent.permissionMode, agent.isPlanMode));
+            return;
+          }
+          const target = arg.toLowerCase();
+          // /mode plan 与 /mode agent 是"计划模式"的显式说法，和 /plan 等价但语义更直观
+          if (target === 'plan' || target === 'agent') {
+            const wantPlan = target === 'plan';
+            if (wantPlan === agent.isPlanMode) {
+              push('notice', wantPlan ? '已处于计划模式' : `当前已是执行模式（${agent.permissionMode}）`);
+              return;
+            }
+            agent.setPlanMode(wantPlan);
+            setPlanMode(agent.isPlanMode);
+            setMode(agent.permissionMode);
+            return;
+          }
+          const parsedMode = parsePermissionMode(arg);
+          if (!parsedMode) {
+            push('error', `未知权限模式: ${arg}（可选：${permissionModeList()}，或 plan / agent）`);
+            return;
+          }
+          agent.setPermissionMode(parsedMode);
+          setPlanMode(agent.isPlanMode);
           setMode(agent.permissionMode);
           return;
         }
@@ -539,6 +599,17 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
       return;
     }
 
+    // Shift+Tab 循环权限模式。必须放在命令面板分支之前：
+    // 面板打开时普通 Tab 被用来补全命令，Shift+Tab 若排在后面就永远轮不到。
+    if (key.tab && key.shift) {
+      if (busy || connecting) {
+        push('notice', '当前任务运行中，结束或 Ctrl+C 取消后再切换权限模式');
+        return;
+      }
+      cyclePermissionMode();
+      return;
+    }
+
     if (busy || connecting) return;
 
     if (palette.length > 0) {
@@ -646,6 +717,8 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
           </Text>
           <Text dimColor>  ·  </Text>
           <Text color={modeColor}>{modeLabel}</Text>
+          {/* 空闲时提示 Shift+Tab 可切模式：按钮式 UI 没有的地方，只能靠状态栏自解释 */}
+          {busy || connecting ? null : <Text dimColor> ⇧⇥</Text>}
           <Text dimColor>  ·  ctx {formatTokens(contextTokens)}</Text>
           {metrics ? (
             <>

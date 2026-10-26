@@ -23,6 +23,7 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
   const loaded = loadConfig({
     cwd: options.cwd,
     ...(flagString(args.flags, 'config') ? { configPath: flagString(args.flags, 'config')! } : {}),
+    ...(flagString(args.flags, 'mode') ? { permissionMode: flagString(args.flags, 'mode')! } : {}),
   });
   if (!loaded.modelConfigured) {
     throw new ForgeError('CONFIG_INVALID', modelSetupHint({ interactive: false }));
@@ -55,6 +56,9 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
     ...(approvalHandler ? { approvalHandler } : {}),
     ...(flagString(args.flags, 'session') ? { sessionId: flagString(args.flags, 'session')! } : {}),
   });
+
+  // `--plan`：只读分析并输出计划，写操作会被策略直接拒绝，适合 CI 里做 dry-run
+  if (flagBool(args.flags, 'plan')) runtime.agent.setPlanMode(true);
 
   let sawDelta = false;
   const off = runtime.agent.events.on((event: AgentEvent) => {

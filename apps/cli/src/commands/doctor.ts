@@ -13,6 +13,7 @@ import { getMemory, listProcesses } from '@forgex/devops';
 import { createBuiltinTools, ToolRegistry } from '@forgex/tools';
 import { flagBool, flagString, type ParsedArgs } from '../args.js';
 import { loadConfig } from '../config/load-config.js';
+import { PERMISSION_MODE_LABELS } from '../config/permission-mode.js';
 
 type Status = 'ok' | 'warn' | 'fail';
 
@@ -47,6 +48,7 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
     loaded = loadConfig({
       cwd: options.cwd,
       ...(flagString(args.flags, 'config') ? { configPath: flagString(args.flags, 'config')! } : {}),
+      ...(flagString(args.flags, 'mode') ? { permissionMode: flagString(args.flags, 'mode')! } : {}),
     });
     checks.push({
       name: '配置文件',
@@ -59,6 +61,12 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
       detail: loaded.modelConfigured
         ? `${loaded.config.model.model} @ ${loaded.config.model.baseUrl}（API Key: ${loaded.config.model.apiKey ? '已配置' : '未配置'}）`
         : '未配置 baseUrl/model，chat/run 不可用',
+    });
+    // 权限模式直接决定"能不能动手"，自检时必须让它可见：yolo 单独告警
+    checks.push({
+      name: '权限模式',
+      status: loaded.config.security.mode === 'yolo' ? 'warn' : 'ok',
+      detail: `${loaded.config.security.mode} — ${PERMISSION_MODE_LABELS[loaded.config.security.mode]}`,
     });
   } catch (err) {
     checks.push({ name: '配置文件', status: 'fail', detail: err instanceof Error ? err.message : String(err) });

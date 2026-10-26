@@ -34,6 +34,8 @@ const BOOLEAN_FLAGS = new Set([
   'yes',
   'full',
   'connect',
+  // `--plan`：一次性任务也走计划模式（只读分析 + 只输出计划），供 CI / 管道做 dry-run
+  'plan',
 ]);
 
 /** 全部已知参数，用于拼写错误校验（避免 `--doctor` 被静默当成 chat） */

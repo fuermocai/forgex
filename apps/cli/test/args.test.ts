@@ -63,6 +63,17 @@ describe('parseArgs', () => {
     const args = parseArgs(['sessions', '--limit', 'abc']);
     expect(flagNumber(args.flags, 'limit')).toBeUndefined();
   });
+
+  it('--mode 取值，--plan 是布尔开关', () => {
+    const args = parseArgs(['chat', '--mode', 'trusted', '--plan']);
+    expect(flagString(args.flags, 'mode')).toBe('trusted');
+    expect(flagBool(args.flags, 'plan')).toBe(true);
+
+    // --mode 属于取值参数：紧跟的位置参数不能被吞成取值
+    const runArgs = parseArgs(['run', '--mode=yolo', '整理日志']);
+    expect(flagString(runArgs.flags, 'mode')).toBe('yolo');
+    expect(runArgs.positionals).toEqual(['整理日志']);
+  });
 });
 
 describe('unknownFlags', () => {
@@ -87,6 +98,9 @@ describe('unknownFlags', () => {
       's_1',
       '--limit',
       '3',
+      '--mode',
+      'readonly',
+      '--plan',
     ]);
     expect(unknownFlags(args.flags)).toEqual([]);
   });
@@ -105,6 +119,7 @@ describe('flagsMissingValue', () => {
   it('取值参数漏写值时返回参数名', () => {
     expect(flagsMissingValue(parseArgs(['sessions', '--limit']).flags)).toEqual(['limit']);
     expect(flagsMissingValue(parseArgs(['--config']).flags)).toEqual(['config']);
+    expect(flagsMissingValue(parseArgs(['chat', '--mode']).flags)).toEqual(['mode']);
   });
 
   it('正常取值与布尔开关不误报', () => {

@@ -22,10 +22,12 @@ import { connectCommand } from './connect.js';
 
 export async function chatCommand(args: ParsedArgs, options: { cwd: string }): Promise<void> {
   const configFlag = flagString(args.flags, 'config');
+  const modeFlag = flagString(args.flags, 'mode');
   const readConfig = () =>
     loadConfig({
       cwd: options.cwd,
       ...(configFlag ? { configPath: configFlag } : {}),
+      ...(modeFlag ? { permissionMode: modeFlag } : {}),
     });
 
   let loaded = readConfig();
@@ -59,6 +61,9 @@ export async function chatCommand(args: ParsedArgs, options: { cwd: string }): P
     approvalHandler: bridge.handler,
     ...(flagString(args.flags, 'session') ? { sessionId: flagString(args.flags, 'session')! } : {}),
   });
+
+  // `--plan`：进入会话即处于计划模式（只读 + 只出方案），等价于进来先敲一次 /plan
+  if (flagBool(args.flags, 'plan')) runtime.agent.setPlanMode(true);
 
   // 只看 stdout 会在 `echo "task" | forgex` 时误判：stdout 是终端、stdin 是管道，
   // Ink 拿不到输入会一直挂着。stdin 不是 TTY 时必须走纯文本。

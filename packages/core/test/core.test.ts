@@ -403,6 +403,19 @@ describe('计划模式', () => {
     expect(fixture.agent.isPlanMode).toBe(false);
     expect(fixture.agent.permissionMode).toBe('standard');
     assertProtocolComplete(result, fixture);
+
+    // 直接设置权限模式：计划模式下切换必须先真正退出计划模式，
+    // 否则 readonly 会被 setPlanMode 的还原逻辑覆盖，用户以为切了其实没生效
+    fixture.agent.setPlanMode(true);
+    fixture.agent.setPermissionMode('trusted');
+    expect(fixture.agent.isPlanMode).toBe(false);
+    expect(fixture.agent.permissionMode).toBe('trusted');
+
+    // 运行中直接升降权限也要立刻反映在 permissionMode 上（TUI 的 Shift+Tab / /mode 依赖）
+    fixture.agent.setPermissionMode('yolo');
+    expect(fixture.agent.permissionMode).toBe('yolo');
+    fixture.agent.setPermissionMode('readonly');
+    expect(fixture.agent.permissionMode).toBe('readonly');
   });
 });
 

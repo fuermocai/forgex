@@ -118,11 +118,14 @@ node apps/cli/dist/main.js run "为什么 8090 端口无法访问？" --yes
 | 命令 | 作用 |
 | --- | --- |
 | `/models` | 列出可用模型并切换；`/models deepseek-v4-pro` 直接切 |
+| `/mode` | 查看/切换权限模式：`/mode trusted`、`/mode plan`（进计划模式）、`/mode agent`（退出计划模式）；`Shift+Tab` 也可循环切换 |
 | `/plan` | 计划模式开关：权限降为 `readonly` + 系统提示词追加"只输出计划"，退出时还原原权限 |
 | `/connect` | 会话内完成 Key 校验 → 持久化到用户环境变量 → 写配置 → 立即生效 |
 | `/context` | 当前上下文 token 估算 |
 | `/session` | 当前会话 id |
 | `/help` `/exit` | 帮助 / 退出 |
+
+命令行侧对应 `--mode <readonly\|standard\|trusted\|yolo>`（优先级高于配置文件与环境变量）和 `--plan`（一次性任务只出计划，适合 CI dry-run）。
 
 模型切换只替换 Provider 与上下文预算，**会话历史、工具注册、权限策略全部保留**；`/connect` 的配置里只写 `apiKeyEnv` 引用，API Key 不明文落盘。
 

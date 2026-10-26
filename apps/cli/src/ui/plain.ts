@@ -12,6 +12,7 @@ import { formatMs, type AgentEvent } from '@forgex/shared';
 import type { ForgeRuntime } from '../runtime/create-runtime.js';
 import { MODEL_PRESETS } from '../runtime/connect-core.js';
 import { switchModel } from '../runtime/model-switch.js';
+import { parsePermissionMode, permissionModeHelp, permissionModeList } from '../config/permission-mode.js';
 import type { ApprovalBridge } from './approval-bridge.js';
 
 export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge): Promise<void> {
@@ -77,6 +78,30 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
           ? `[提示] 已进入计划模式（权限 ${agent.permissionMode}）：只读分析并输出计划\n`
           : `[提示] 已退出计划模式（权限 ${agent.permissionMode}）\n`,
       );
+      continue;
+    }
+    if (text === '/mode' || text.startsWith('/mode ')) {
+      const target = text.slice('/mode'.length).trim().toLowerCase();
+      if (!target) {
+        stdout.write(`${permissionModeHelp(agent.permissionMode, agent.isPlanMode)}\n`);
+        continue;
+      }
+      if (target === 'plan' || target === 'agent') {
+        const wantPlan = target === 'plan';
+        if (wantPlan === agent.isPlanMode) {
+          stdout.write(`[提示] ${wantPlan ? '已处于计划模式' : `当前已是执行模式（${agent.permissionMode}）`}\n`);
+          continue;
+        }
+        // 切换结果由 agent 的 notice 事件统一打印，避免这里和事件各输出一遍
+        agent.setPlanMode(wantPlan);
+        continue;
+      }
+      const mode = parsePermissionMode(target);
+      if (!mode) {
+        stdout.write(`[错误] 未知权限模式: ${target}（可选：${permissionModeList()}，或 plan / agent）\n`);
+        continue;
+      }
+      agent.setPermissionMode(mode);
       continue;
     }
     if (text === '/models' || text.startsWith('/models ')) {
@@ -179,6 +204,7 @@ function printHelp(): void {
     [
       '可用命令：',
       '  /models [模型名]  查看可用模型 / 切换模型',
+      '  /mode [模式]      查看或切换权限模式（/mode plan、/mode agent 控制计划模式）',
       '  /plan             进入或退出计划模式（只读，只出计划）',
       '  /connect          提示退出后运行 forgex connect',
       '  /session          显示当前会话 id',

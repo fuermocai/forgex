@@ -275,6 +275,36 @@ export class Agent {
     });
   }
 
+  /**
+   * 运行时直接设置权限模式（TUI 的 Shift+Tab 与 `/mode`、纯文本模式的 `/mode` 都走这里）。
+   *
+   * 关键点：如果当前处于计划模式，先真正退出计划模式再落目标权限。
+   * 否则 `settings.mode` 会被计划模式的 readonly 残留覆盖，用户以为切到了 trusted
+   * 实际仍然只读——这类"看起来切了但没生效"的安全配置差异必须避免。
+   * 与 setPlanMode 一样发 notice，TUI / 纯文本两种渲染都能立刻看到结果。
+   */
+  setPermissionMode(mode: PermissionMode): void {
+    const wasPlan = this.planMode;
+    if (wasPlan) {
+      this.planMode = false;
+      this.modeBeforePlan = null;
+      this.context.setSystemPrompt(this.baseSystemPrompt);
+    }
+
+    const previous = this.settings.mode;
+    this.settings.mode = mode;
+    if (!wasPlan && previous === mode) return;
+
+    this.events.emit({
+      type: 'notice',
+      level: mode === 'yolo' ? 'warn' : 'info',
+      message: wasPlan
+        ? `已退出计划模式，权限模式切换为 ${mode}`
+        : `权限模式已切换：${previous} → ${mode}`,
+      ts: Date.now(),
+    });
+  }
+
   private persist(message: ChatMessage): void {
     if (!this.store) return;
     try {

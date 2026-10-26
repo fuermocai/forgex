@@ -87,8 +87,43 @@ describe('loadConfig', () => {
     expect(loaded.sources).toContain('环境变量');
   });
 
-  it('支持 FORGEX_API_KEY 直接提供 Key', () => {
+  it('命令行 --mode 覆盖配置文件与环境变量', async () => {
+    await writeFile(
+      join(dir, 'forgex.config.json'),
+      JSON.stringify({ model: { baseUrl: 'https://a.example', model: 'a' }, security: { mode: 'readonly' } }),
+      'utf8',
+    );
+
     const loaded = loadConfig({
+      cwd: dir,
+      permissionMode: 'trusted',
+      env: { FORGEX_PERMISSION_MODE: 'standard' },
+      skipGlobal: true,
+      logger: silent,
+    });
+
+    expect(loaded.config.security.mode).toBe('trusted');
+    expect(loaded.sources).toContain('命令行参数（--mode）');
+  });
+
+  it('命令行 --mode 支持别名与大小写', () => {
+    const loaded = loadConfig({
+      cwd: dir,
+      permissionMode: 'Read-Only',
+      env: {},
+      skipGlobal: true,
+      logger: silent,
+    });
+    expect(loaded.config.security.mode).toBe('readonly');
+  });
+
+  it('命令行 --mode 非法时报 CONFIG_INVALID 并回显可选值', () => {
+    expect(() =>
+      loadConfig({ cwd: dir, permissionMode: 'root', env: {}, skipGlobal: true, logger: silent }),
+    ).toThrowError(/--mode 取值非法: root.*readonly \/ standard \/ trusted \/ yolo/);
+  });
+
+  it('支持 FORGEX_API_KEY 直接提供 Key', () => {    const loaded = loadConfig({
       cwd: dir,
       env: { FORGEX_BASE_URL: 'https://x.example', FORGEX_MODEL: 'x', FORGEX_API_KEY: 'sk-direct' },
       skipGlobal: true,

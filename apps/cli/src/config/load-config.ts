@@ -2,7 +2,7 @@
  * 配置加载与校验。
  *
  * 优先级（后者覆盖前者）：
- *   内置默认值 < 配置文件 < 环境变量 < 命令行参数（由命令自行覆盖）
+ *   内置默认值 < 配置文件 < 环境变量 < 命令行参数（--mode / --config 等）
  *
  * 安全约束：
  *  - API Key 只允许来自配置文件或环境变量（`apiKeyEnv` 间接引用），
@@ -14,9 +14,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
-import { ForgeError, createLogger, type Logger, type RemoteHostConfig } from '@forgex/shared';
+import { ForgeError, createLogger, type Logger, type PermissionMode, type RemoteHostConfig } from '@forgex/shared';
 import type { ModelConfig } from '@forgex/models';
 import { PROVIDERS } from './providers.js';
+import { parsePermissionMode, permissionModeList } from './permission-mode.js';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8000/v1';
 const DEFAULT_MODEL = 'local-model';
@@ -112,6 +113,8 @@ export interface LoadConfigOptions {
   cwd?: string;
   /** 显式指定的配置文件（--config） */
   configPath?: string;
+  /** 命令行 `--mode`：优先级高于配置文件与环境变量 */
+  permissionMode?: string;
   env?: NodeJS.ProcessEnv;
   logger?: Logger;
   /** 跳过 ~/.forgex/config.json（测试隔离用，生产默认 false） */
@@ -159,6 +162,16 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   if (detected) sources.push('环境变量（自动识别 Provider）');
 
   const merged = deepMerge(deepMerge(fileData, detected ?? {}), envData);
+
+  // 命令行 `--mode` 是最高优先级：写在 zod 校验之前。
+  // 非法值直接报错而不是"解析失败就退回标准模式"——安全相关配置猜错方向代价太大。
+  const modeOverride = resolveModeOverride(options.permissionMode);
+  if (modeOverride) {
+    const security = merged.security;
+    merged.security = { ...(isRecord(security) ? security : {}), mode: modeOverride };
+    sources.push('命令行参数（--mode）');
+  }
+
   const parsed = ConfigSchema.safeParse(merged);
   if (!parsed.success) {
     const issues = parsed.error.issues
@@ -356,6 +369,21 @@ function numberEnv(raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === '') return undefined;
   const value = Number(raw);
   return Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * 解析命令行 `--mode`。
+ *
+ * - 未传 → `null`，表示不覆盖；
+ * - 传了但不认识 → 抛 CONFIG_INVALID，并回显可选值，避免用户以为已经切到某个模式。
+ */
+function resolveModeOverride(raw: string | undefined): PermissionMode | null {
+  if (raw === undefined) return null;
+  const mode = parsePermissionMode(raw);
+  if (!mode) {
+    throw new ForgeError('CONFIG_INVALID', `--mode 取值非法: ${raw}（可选：${permissionModeList()}）`);
+  }
+  return mode;
 }
 
 /** 一层深合并（配置结构固定为两级，足够使用） */
