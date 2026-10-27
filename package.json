@@ -1,6 +1,6 @@
 {
   "name": "forgex",
-  "version": "0.5.2",
+  "version": "0.5.4",
   "private": true,
   "type": "module",
   "description": "ForgeX - enterprise-grade coding & DevOps agent runtime",

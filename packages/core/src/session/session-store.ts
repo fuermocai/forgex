@@ -171,15 +171,26 @@ export class SessionStore implements AuditSink {
       .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC')
       .all(sessionId) as Row[];
     return rows.map((row) => {
+      const role = String(row.role);
+      if (!['system', 'user', 'assistant', 'tool'].includes(role)) {
+        throw new ForgeError('SESSION_ERROR', `会话消息 ${String(row.id)} 的 role 无效`, {
+          details: { sessionId, messageId: row.id, role },
+        });
+      }
       const message: ChatMessage = {
-        role: String(row.role) as ChatMessage['role'],
+        role: role as ChatMessage['role'],
         content: row.content === null ? null : String(row.content),
       };
       if (typeof row.tool_calls === 'string' && row.tool_calls.length > 0) {
         try {
-          message.tool_calls = JSON.parse(row.tool_calls) as ChatMessage['tool_calls'];
-        } catch {
-          // 损坏的历史记录不应导致整个会话无法恢复
+          const parsed: unknown = JSON.parse(row.tool_calls);
+          if (!Array.isArray(parsed) || !parsed.every(isStoredToolCall)) throw new TypeError('tool_calls 结构无效');
+          message.tool_calls = parsed as ChatMessage['tool_calls'];
+        } catch (err) {
+          throw new ForgeError('SESSION_ERROR', `会话消息 ${String(row.id)} 的工具调用历史损坏，拒绝静默丢弃`, {
+            details: { sessionId, messageId: row.id },
+            cause: err,
+          });
         }
       }
       if (typeof row.tool_call_id === 'string') message.tool_call_id = row.tool_call_id;
@@ -247,4 +258,13 @@ function mapSession(row: Row): SessionRecord {
     title: row.title === null ? null : String(row.title),
     status: String(row.status),
   };
+}
+
+function isStoredToolCall(value: unknown): value is NonNullable<ChatMessage['tool_calls']>[number] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const call = value as Record<string, unknown>;
+  if (typeof call.id !== 'string' || call.id.length === 0 || call.type !== 'function') return false;
+  if (!call.function || typeof call.function !== 'object' || Array.isArray(call.function)) return false;
+  const fn = call.function as Record<string, unknown>;
+  return typeof fn.name === 'string' && fn.name.length > 0 && typeof fn.arguments === 'string';
 }

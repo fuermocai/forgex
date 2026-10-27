@@ -139,7 +139,7 @@ export class TaskPlanner {
       cancelled: results.filter((r) => r.final_status === 'cancelled').length,
       results,
       duration_ms: Date.now() - started,
-      truncated: results.length >= maxSteps,
+      truncated: results.length >= maxSteps && hasWorkRemaining(finalPlan),
     };
   }
 

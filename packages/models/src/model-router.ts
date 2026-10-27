@@ -59,7 +59,7 @@ export class ModelRouter {
 
   /** 选择最合适的模型 provider */
   select(request: RoutingRequest): ModelProvider {
-    const candidates = this.filterCandidates(request);
+    const candidates = this.sortCandidates(this.filterCandidates(request), request);
 
     if (candidates.length === 0) {
       throw new ForgeError(
@@ -69,24 +69,12 @@ export class ModelRouter {
       );
     }
 
-    // 按 tier 排序（优先便宜快的），再按健康度
-    candidates.sort((a, b) => {
-      const tierDiff = a.tier - b.tier;
-      if (tierDiff !== 0) return tierDiff;
-      const ha = this.health.get(a.id)!;
-      const hb = this.health.get(b.id)!;
-      return ha.consecutiveFails - hb.consecutiveFails;
-    });
-
-    // 跳过冷却中（连续失败过多 + 时间内）的模型
+    // 冷却中的模型不参与本次选择；全部不可用时明确失败。
     const now = Date.now();
-    const pick =
-      candidates.find((c) => {
-        const h = this.health.get(c.id)!;
-        if (h.consecutiveFails === 0) return true;
-        if (now - h.lastFailAt > this.failCooldownMs) return true;
-        return false;
-      }) ?? candidates[0];
+    const pick = candidates.find((c) => {
+      const h = this.health.get(c.id)!;
+      return h.consecutiveFails === 0 || now - h.lastFailAt >= this.failCooldownMs;
+    });
 
     if (!pick) {
       throw new ForgeError(
@@ -106,7 +94,22 @@ export class ModelRouter {
     request: RoutingRequest,
     fn: (provider: ModelProvider) => Promise<T>,
   ): Promise<T> {
-    const candidates = this.filterCandidates(request).sort((a, b) => a.tier - b.tier);
+    const matching = this.filterCandidates(request);
+    if (matching.length === 0) {
+      throw new ForgeError(
+        'MODEL_CAPABILITY_MISMATCH',
+        `没有匹配能力的模型：${request.requiredCapabilities?.join(',') ?? '无约束'}`,
+        { details: { available: [...this.models.keys()] } },
+      );
+    }
+    const now = Date.now();
+    const candidates = this.sortCandidates(matching.filter((c) => {
+      const h = this.health.get(c.id)!;
+      return h.consecutiveFails === 0 || now - h.lastFailAt >= this.failCooldownMs;
+    }), request);
+    if (candidates.length === 0) {
+      throw new ForgeError('MODEL_UNAVAILABLE', '没有当前可用的模型', { details: { available: [...this.models.keys()] } });
+    }
     const errors: string[] = [];
 
     for (const c of candidates) {
@@ -143,6 +146,17 @@ export class ModelRouter {
     }
 
     return result;
+  }
+
+  private sortCandidates(candidates: ModelDescriptor[], request: RoutingRequest): ModelDescriptor[] {
+    return candidates.sort((a, b) => {
+      const tierA = request.preferTier === undefined ? a.tier : Math.abs(a.tier - request.preferTier);
+      const tierB = request.preferTier === undefined ? b.tier : Math.abs(b.tier - request.preferTier);
+      if (tierA !== tierB) return tierA - tierB;
+      const healthA = this.health.get(a.id)?.consecutiveFails ?? 0;
+      const healthB = this.health.get(b.id)?.consecutiveFails ?? 0;
+      return healthA - healthB || a.tier - b.tier;
+    });
   }
 
   listModels(): string[] {

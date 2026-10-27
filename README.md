@@ -1,8 +1,8 @@
 # ForgeX
 
-> **v0.5.0 · Autonomous Software Engineer** — 从"会干活的 Agent"升级为**能自主执行完整需求**的软件工程师。
+> **ForgeX · Coding + DevOps Agent** — 面向本地工作区和私有模型服务的可控开发助手。
 
-面向企业私有化环境的 Coding + DevOps Agent。TypeScript 负责 Agent Runtime、工具、安全和 **自主执行引擎**，Rust 负责受控命令执行器。零依赖 Agent SDK / Agent Runtime。
+当前 CLI 的稳定路径是会话式 Agent：模型调用工具、工具经统一权限与审计链执行，Agent 在没有后续工具调用时结束本轮。仓库还包含需求分析、任务编排和质量门禁等独立模块；它们尚未组成 CLI 的端到端自主执行流程。TypeScript 负责 Agent Runtime、工具和安全策略，Rust 提供可选的受控命令执行器。
 
 ---
 
@@ -117,30 +117,37 @@ node apps/cli/dist/main.js run "为什么 8090 端口无法访问？" --yes
 
 | 命令 | 作用 |
 | --- | --- |
-| `/models` | 列出可用模型并切换；`/models deepseek-v4-pro` 直接切 |
+| `/models` | 列出可用模型并切换；`/models deepseek-v4-pro` 直接切（没有配置文件时自动创建 `~/.forgex/config.json`） |
+| `/key` | 填写/替换 API Key：`/key` 进入隐藏输入（`•` 掩码，回车确认 / Esc 取消），`/key sk-xxx` 一步到位；两种情况都会立即做一次连通性校验 |
 | `/mode` | 查看/切换权限模式：`/mode trusted`、`/mode plan`（进计划模式）、`/mode agent`（退出计划模式）；`Shift+Tab` 也可循环切换 |
 | `/plan` | 计划模式开关：权限降为 `readonly` + 系统提示词追加"只输出计划"，退出时还原原权限 |
-| `/connect` | 会话内完成 Key 校验 → 持久化到用户环境变量 → 写配置 → 立即生效 |
+| `/connect` | 会话内完成 Key 校验 → 持久化 → 写配置 → 立即生效（完整向导） |
 | `/context` | 当前上下文 token 估算 |
 | `/session` | 当前会话 id |
 | `/help` `/exit` | 帮助 / 退出 |
 
-命令行侧对应 `--mode <readonly\|standard\|trusted\|yolo>`（优先级高于配置文件与环境变量）和 `--plan`（一次性任务只出计划，适合 CI dry-run）。
+命令行侧对应 `--mode <readonly\|standard\|trusted\|yolo>`（优先级高于配置文件与环境变量）和 `--plan`（只读对话模式；模型按提示草拟建议，不创建或持久化可执行步骤计划）。
 
-模型切换只替换 Provider 与上下文预算，**会话历史、工具注册、权限策略全部保留**；`/connect` 的配置里只写 `apiKeyEnv` 引用，API Key 不明文落盘。
+模型切换只替换 Provider 与上下文预算，**会话历史、工具注册、权限策略全部保留**；配置里只写 `apiKeyEnv` 引用，`forgex.config.json` 里不出现明文 Key。
+
+Key 的落盘位置在三个平台统一为 `~/.forgex/credentials.json`（权限 `600`），启动时由 `loadConfig` 在环境变量缺失时兜底注入——填一次，之后每次启动（包括同一终端里重开）都能直接用。不再额外写 Windows 用户环境变量：那种写法只对新开的终端生效，同一窗口里重开会表现为"Key 又没了"。真环境变量的优先级始终高于凭据文件。
 
 ---
 
-## v0.5.0 新能力
+## 能力与成熟度
 
-| Phase | 包 | 能力 | 核心安全约束 |
+以下区分 CLI 用户现在能直接使用的能力与仓库内的独立模块，避免把尚未接入的模块当作产品闭环。
+
+| 范围 | 包 | 能力 | 当前状态 |
 | --- | --- | --- | --- |
-| ① 需求理解 | `@forgex/requirement-engine` | 自然语言 → 结构化需求 → 歧义检测 → 验收标准 → 追溯链 | `ApprovalCriterion.approved` 默认 `false`，模型生成的永远是 draft |
-| ② 自主执行 | `@forgex/autonomous` | 5 维预算硬约束（tokens/time/tools/models/steps）→ 长任务 → 检查点暂停/恢复 | 每步检查预算，耗尽立即停；不允许无限循环 |
-| ③ 质量门禁 | `@forgex/quality-gate` | TestRunner → StaticAnalyzer → SecurityScanner 三阶段串联 | critical/high 安全漏洞立即阻断；静态分析 error 阻断 |
-| ④ 多模块协调 | `@forgex/orchestrator` | 依赖图拓扑排序 + 循环依赖检测 + 分层并行计划 | 有环立即阻断；影响面分析 |
-| ⑤ 模型路由 | models 增强 | 能力匹配 + tier 优先 + 健康度降级 + 故障回退 | 能力不匹配 → 明确错误；全失败 → `MODEL_FALLBACK_EXHAUSTED` |
-| ⑥ 工程知识 | core 增强 | 结构化工程经验存储 + 生命周期（draft → active → deprecated → archived） | 知识必须 `evidenceRefs.length >= 1`；LLM 推断默认 draft |
+| CLI 主路径 | `apps/cli` + `@forgex/core` | chat/run、会话、工具调用、权限审批、上下文与结果状态 | 可直接使用 |
+| CLI 安全链 | `@forgex/security` + `@forgex/tools` | 工作区边界、命令策略、审批、审计、工具输出限额 | CLI 主路径使用 |
+| 需求分析 | `@forgex/requirement-engine` | 结构化需求、歧义和验收标准 | 独立模块，未接入 CLI 任务流 |
+| 自主执行 | `@forgex/autonomous` | 预算和步骤执行抽象 | 实验性模块；没有 CLI 生产执行器 |
+| 质量门禁 | `@forgex/quality-gate` | 可注入的测试、静态分析和安全扫描阶段 | 独立抽象；未接入 CLI，需配置实际执行器 |
+| 多模块协调 | `@forgex/orchestrator` | 依赖图与执行分层 | 独立模块，未接入 CLI 任务流 |
+| 模型路由 / 工程知识 | `@forgex/models` / `@forgex/core` | 路由、知识存储等扩展能力 | 独立模块，未接入 CLI 默认运行时 |
+| 持久化审批引擎 | `@forgex/approval` | 风险级别、参数哈希和审批记录 | 独立模块；CLI 当前仍使用 `@forgex/security` 的旧审批实现 |
 
 ### 安全设计（摘要）
 
@@ -156,12 +163,8 @@ node apps/cli/dist/main.js run "为什么 8090 端口无法访问？" --yes
 │  · API Key 不进入日志、会话、审计；敏感字段自动脱敏           │
 │  · Agent 输出 → ToolDispatcher → Zod → Policy → Approval    │
 │                                                             │
-│  v0.5.0 新增：                                               │
-│  · 验收标准必须用户显式批准（approved=false 默认）           │
-│  · 5 维预算硬约束，超预算立即停止                             │
-│  · 安全扫描 critical/high 立即阻断交付                       │
-│  · 模型能力不匹配不随机选择，明确报错                        │
-│  · 工程知识必须有出处（evidenceRefs 强制）                   │
+│  · 高级任务模块尚未接入 CLI 主执行路径                        │
+│  · 质量门禁必须显式配置执行器；空配置不会视为通过             │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -179,15 +182,13 @@ node apps/cli/dist/main.js run "为什么 8090 端口无法访问？" --yes
 │  └─────────────────────┬───────────────────────────────────┘    │
 │                        │                                         │
 │  ┌─ packages/core ─────────────────────────────────────────┐    │
-│  │  Agent Loop · Task Planner · Sub-Agent Runner             │    │
-│  │  Context · Session · Metrics · Event Bus · Memory         │    │
-│  │  Engineering Knowledge (v0.5 新增)                        │    │
+│  │  Agent Loop · Context · Session · Metrics · Event Bus     │    │
+│  │  Task Planner / Sub-Agent / Memory (可组合模块)            │    │
 │  └─────────────────────┬───────────────────────────────────┘    │
 │                        │                                         │
-│  ┌─ v0.5 新增执行层 ────────────────────────────────────────┐    │
-│  │  RequirementEngine → AutonomousRunner → QualityGate      │    │
-│  │                              ↑                     ↑     │    │
-│  │                    Orchestrator            Model Router   │    │
+│  ┌─ 独立扩展模块（当前不在 CLI 主路径）──────────────────────┐    │
+│  │  RequirementEngine · Autonomous · QualityGate             │    │
+│  │  Orchestrator · Recovery · Integrations                  │    │
 │  └─────────────────────┬───────────────────────────────────┘    │
 │                        │                                         │
 │  ┌─ packages/ ──────────────────────────────────────────────┐    │
@@ -203,7 +204,9 @@ node apps/cli/dist/main.js run "为什么 8090 端口无法访问？" --yes
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### 测试覆盖
+### v0.5.0 发布时的验证快照
+
+以下数字是 v0.5.0 发布记录，不代表当前工作树已重新验证。
 
 ```
 Test Files   62 passed
@@ -233,7 +236,7 @@ forgex/
 │   ├── devops                        # Linux/Windows 只读系统诊断、Docker、SSH、K8s
 │   ├── integrations                  # GitLab / Jenkins / Git Review / Pipeline
 │   ├── requirement-engine  (v0.5 新)  # 需求解析、歧义检测、验收标准、追溯链
-│   ├── autonomous          (v0.5 新)  # 预算追踪、长任务执行、检查点恢复
+│   ├── autonomous          (实验性)    # 注入式步骤执行与预算钩子；尚未接入 CLI
 │   ├── quality-gate        (v0.5 新)  # TestRunner / StaticAnalyzer / SecurityScanner 聚合
 │   └── orchestrator        (v0.5 新)  # 依赖图拓扑排序、循环检测、分层并行
 ├── crates/executor                   # Rust 受控执行器
@@ -300,4 +303,4 @@ pnpm publish:npm
 | v0.1.0 | 第一版 | 87 TS + 4 Rust | 模型接入 + Agent Loop + 工具 + 安全层 |
 | v0.3.0 | Task Planning + Sub-Agent + Project Memory | — | 计划器、子 Agent、结构化记忆 |
 | v0.4.0 | 稳态 | 693 全绿 | 全包构建 + 集成测试 + 基准 |
-| **v0.5.0** | **Autonomous Software Engineer** | **817 全绿** | 需求理解 · 自主执行 · 质量门禁 · 多模块协调 · 模型路由 · 工程知识 |
+| **v0.5.0** | **模块扩展（部分未接 CLI）** | **发布时 817 项通过** | 需求分析 · 自主执行原语 · 质量门禁接口 · 多模块协调 · 模型路由 · 工程知识 |

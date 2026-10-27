@@ -19,6 +19,7 @@
  * 不实现 AgentLoop 调用的 mock 适配——Phase 1 先写骨架，集成时再补。
  */
 import type { LoopResult } from '../agent/agent-loop.js';
+import type { JsonValue } from '@forgex/shared';
 import type { PlanManager } from './plan-manager.js';
 import { verifyStep } from './task-verifier.js';
 import type { ExecutionResult, TaskPlan, TaskStep } from './types.js';
@@ -74,7 +75,11 @@ export class StepExecutor {
    * 执行一个步骤。不抛异常——所有错误都转成 StepExecResult.final_status='failed'。
    *
    * 完整流程：mark running → AgentLoop → verify → mark completed/failed
-   * 失败重试：step.attempts < step.max_attempts 且 step.attempts < globalMaxAttempts
+   *
+   * 重试策略（v0.3.x）：**只有「明确可重试且没有产生工具副作用」的失败才重放**。
+   * Agent 步骤可能已经改过文件、跑过命令，盲目重放会把写入/提交执行两遍；
+   * 因此 `retryable !== true`，或本轮已有工具调用结果时，立刻结束。
+   * 预算内重试时走 failed → ready → running 的合法转移。
    */
   async executeStep(planId: string, stepId: string): Promise<StepExecResult> {
     const started = Date.now();
@@ -141,8 +146,21 @@ export class StepExecutor {
 
       attemptsUsed++;
 
-      const result = await this.runAttempt(plan, step);
+      const retryHint = lastVerifyResult && !lastVerifyResult.passed ? lastVerifyResult.reason : undefined;
+      const result = await this.runAttempt(plan, step, retryHint);
       lastResult = result;
+      if (result.cancelled) {
+        this.planManager.updateStepStatus(planId, stepId, 'cancelled', result.failureReason ?? '执行被取消');
+        this.planManager.updateStepResult(planId, stepId, result);
+        return {
+          step_id: stepId,
+          final_status: 'cancelled',
+          attemptsUsed,
+          execution_result: result,
+          duration_ms: Date.now() - started,
+          cancelled: true,
+        };
+      }
       lastVerifyResult = verifyStep(step, result);
 
       if (result.success && lastVerifyResult.passed) {
@@ -163,6 +181,13 @@ export class StepExecutor {
       // 本次尝试失败：running → failed（合法转移，PlanManager 会累加 attempts）
       this.planManager.updateStepStatus(planId, stepId, 'failed', result.failureReason);
 
+      // 只有明确的瞬时错误且本轮没有工具调用/结果时才重放。
+      // 验证失败本身不是瞬时错误；有工具记录就不能假定副作用可安全重放。
+      if (
+        result.retryable !== true ||
+        result.toolCallCount > 0 ||
+        (result.toolResults?.length ?? 0) > 0
+      ) break;
       if (attemptsUsed >= maxAttempts) {
         break;
       }
@@ -188,7 +213,7 @@ export class StepExecutor {
    * 单次 attempt 执行：组装 prompt → 调 Agent → 解析结果。
    * 如果没注入 agent（测试场景），返回空的失败结果。
    */
-  private async runAttempt(plan: TaskPlan, step: TaskStep): Promise<ExecutionResult> {
+  private async runAttempt(plan: TaskPlan, step: TaskStep, retryHint?: string): Promise<ExecutionResult> {
     if (!this.agent) {
       return {
         success: false,
@@ -196,6 +221,8 @@ export class StepExecutor {
         durationMs: 0,
         verificationPassed: false,
         failureReason: 'StepExecutor 未注入 agent，无法执行',
+        // 没有执行者，重试多少次结果都一样，直接判定不可重试
+        retryable: false,
       };
     }
 
@@ -205,12 +232,12 @@ export class StepExecutor {
       `目标: 执行上述步骤，完成后输出最终结果。\n` +
       `风险等级: ${step.risk_level}\n` +
       (step.required_tools.length > 0 ? `需要工具: ${step.required_tools.join(', ')}\n` : '') +
+      (retryHint ? `\n上一轮未通过验证：${retryHint}\n请先检查当前状态，再完成缺失部分。\n` : '') +
       (extra ? `\n附加上下文:\n${extra}\n` : '');
 
     try {
       const result = await this.agent.run(prompt, { signal: this.signal });
       const toolCalls = result.toolCalls;
-      const iterations = result.iterations;
 
       const cancelled = result.reason === 'aborted';
       if (cancelled) {
@@ -220,15 +247,34 @@ export class StepExecutor {
           durationMs: 0,
           verificationPassed: false,
           failureReason: '执行被取消',
+          cancelled: true,
         };
       }
 
+      const success = result.reason === 'completed';
+      const toolResults = result.toolResults ?? [];
+      // Agent 正常结束只是模型轮次结束，不等于工作已完成。
+      // auto 验证至少要求有工具执行证据，且没有失败或被截断的结果。
+      const hasVerifiedToolEvidence =
+        toolResults.length > 0 && toolResults.every(({ result: toolResult }) => toolResult.ok && !toolResult.truncated);
+
       return {
-        success: true,
+        success,
         toolCallCount: toolCalls,
         durationMs: 0, // Phase 1 暂时拿不到 LoopResult 的总耗时，后续集成 metrics
-        verificationPassed: true,
-        summary: 'Agent 完成执行',
+        verificationPassed: success && hasVerifiedToolEvidence,
+        summary: result.text,
+        ...(success ? {} : { failureReason: `AgentLoop 终止原因: ${result.reason}` }),
+        retryable:
+          result.reason === 'error' &&
+          result.error?.retryable === true &&
+          (result.toolResults?.length ?? 0) === 0,
+        toolResults: toolResults.map(({ toolName, result: toolResult }) => ({
+          toolName,
+          ok: toolResult.ok,
+          truncated: toolResult.truncated,
+          ...(toolResult.data !== undefined ? { data: projectVerificationData(toolName, toolResult.data) } : {}),
+        })),
       };
     } catch (err) {
       return {
@@ -237,7 +283,51 @@ export class StepExecutor {
         durationMs: 0,
         verificationPassed: false,
         failureReason: err instanceof Error ? err.message : String(err),
+        // 抛异常代表 AgentLoop 自身的意外状态（bug、provider 构造失败等），
+        // 且无法确认是否已产生副作用，一律不重放
+        retryable: false,
       };
     }
+  }
+}
+
+/** 只把验证需要的字段写入计划结果，避免将整份文件/diff/命令输出塞进 checkpoint。 */
+function projectVerificationData(toolName: string, raw: JsonValue): JsonValue {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const data = raw as Record<string, JsonValue>;
+  switch (toolName) {
+    case 'read_file':
+      return typeof data.path === 'string' ? { path: data.path } : {};
+    case 'list_directory':
+      return {
+        entries: Array.isArray(data.entries)
+          ? data.entries.flatMap((entry) => {
+              if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+              const item = entry as Record<string, JsonValue>;
+              return typeof item.path === 'string' && typeof item.type === 'string'
+                ? [{ path: item.path, type: item.type }]
+                : [];
+            })
+          : [],
+      };
+    case 'run_command':
+      return typeof data.exitCode === 'number' ? { exitCode: data.exitCode } : {};
+    case 'git_status':
+      return {
+        entries: Array.isArray(data.entries)
+          ? data.entries.flatMap((entry) => {
+              if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+              const item = entry as Record<string, JsonValue>;
+              return typeof item.status === 'string' ? [{ status: item.status }] : [];
+            })
+          : [],
+      };
+    case 'git_diff': {
+      const hasDiff = typeof data.diff === 'string';
+      const diff = hasDiff ? data.diff as string : '';
+      return { complete: hasDiff, hasConflictMarkers: hasDiff && /^(<<<<<<<|=======|>>>>>>>)(?:\s.*)?$/m.test(diff) };
+    }
+    default:
+      return {};
   }
 }

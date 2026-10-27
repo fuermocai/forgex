@@ -46,6 +46,7 @@ beforeEach(async () => {
     cwd: dir,
     configPath,
     skipGlobal: true,
+    skipCredentials: true,
     env: { DEEPSEEK_API_KEY: 'sk-test' },
   });
   runtime = createRuntime({ cwd: dir, loaded });
@@ -66,6 +67,8 @@ describe('/models 切换模型', () => {
       model: 'deepseek-v4-pro',
       baseUrl: 'https://api.deepseek.com',
       saved: true,
+      apiKeyEnv: 'DEEPSEEK_API_KEY',
+      keyReady: true,
     });
     expect(runtime!.agent.modelName).toBe('deepseek-v4-pro');
     expect(runtime!.config.model.model).toBe('deepseek-v4-pro');
@@ -88,5 +91,21 @@ describe('/models 切换模型', () => {
     expect(result.model).toBe('my-local-model');
     expect(result.baseUrl).toBe('https://api.deepseek.com');
     expect(runtime!.agent.modelName).toBe('my-local-model');
+  });
+
+  it('跨提供方切换时清掉旧 Key，提示重新填写', () => {
+    const savedEnv = process.env.DEEPSEEK_API_KEY;
+    delete process.env.DEEPSEEK_API_KEY;
+    try {
+      // 模拟"上一个提供方用的是别的 Key 变量"
+      runtime!.config.model.apiKeyEnv = 'OPENAI_API_KEY';
+      const result = switchModel(runtime!, 'deepseek-v4-pro');
+
+      expect(result.apiKeyEnv).toBe('DEEPSEEK_API_KEY');
+      expect(result.keyReady).toBe(false);
+      expect(runtime!.config.model.apiKey).toBeUndefined();
+    } finally {
+      if (savedEnv !== undefined) process.env.DEEPSEEK_API_KEY = savedEnv;
+    }
   });
 });

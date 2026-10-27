@@ -6,12 +6,12 @@
  *
  * 验证类型（对应 types.ts StepVerification.type）：
  *   - tool_return_ok         — 执行的最后一个工具返回 result.success=true
- *   - file_exists            — result.evidence_refs 里应该有 code_snippet 且 source 是文件路径
+ *   - file_exists            — 执行结果必须包含目标路径的成功读取/目录项证据
  *   - command_exit_zero      — 执行过程中 run_command 结果 code=0
- *   - git_no_conflict        — 没有 git merge conflict 证据
+ *   - git_no_conflict        — 完整 git_status 不含未合并项，且可用 diff 不含冲突标记
  *   - auto                   — 默认：result.success=true 且 verificationPassed=true 即可
  *
- * 未来扩展：custom type 让模型定义验证逻辑（需要 prompt + context）。
+ * custom 暂未注册验证器，因此 fail closed。
  */
 import type { ExecutionResult, StepVerification, TaskStep } from './types.js';
 
@@ -41,40 +41,77 @@ export function verifyStep(step: TaskStep, result?: ExecutionResult): VerifyResu
   if (vtype === 'tool_return_ok') {
     if (!result) return { passed: false, reason: '缺少执行结果', type: vtype };
     if (!result.success) return { passed: false, reason: `工具调用失败: ${result.failureReason ?? '未知'}`, type: vtype };
-    // 要求至少调了一次工具
-    if (result.toolCallCount === 0) return { passed: false, reason: '未调用任何工具', type: vtype };
+    const lastTool = result.toolResults?.at(-1);
+    if (!lastTool) return { passed: false, reason: '缺少工具执行结果', type: vtype };
+    if (!lastTool.ok) return { passed: false, reason: `最后一个工具调用失败: ${lastTool.toolName}`, type: vtype };
     return { passed: true, type: vtype };
   }
 
   if (vtype === 'file_exists') {
     if (!result) return { passed: false, reason: '缺少执行结果', type: vtype };
-    // 有 code_snippet 或 git_diff_hunk 类型证据就当通过
-    const hasEvidence = step.evidence_refs.some(
-      (e) => e.kind === 'code_snippet' || e.kind === 'git_diff_hunk' || e.kind === 'git_commit',
-    );
-    if (!hasEvidence) return { passed: false, reason: '缺少文件相关证据', type: vtype };
+    const target = normalizePath(step.verification.target ?? '');
+    if (!target) return { passed: false, reason: 'file_exists 验证缺少目标路径', type: vtype };
+    const exists = result.toolResults?.some((tool) => {
+      if (!tool.ok || !tool.data || typeof tool.data !== 'object' || Array.isArray(tool.data)) return false;
+      const data = tool.data as Record<string, unknown>;
+      if (tool.toolName === 'read_file' && typeof data.path === 'string') return normalizePath(data.path) === target;
+      if (tool.toolName === 'list_directory' && Array.isArray(data.entries)) {
+        return data.entries.some((entry) => {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+          const record = entry as Record<string, unknown>;
+          return record.type === 'file' && typeof record.path === 'string' && normalizePath(record.path) === target;
+        });
+      }
+      return false;
+    });
+    if (!exists) return { passed: false, reason: `没有证据证明目标文件存在: ${step.verification.target}`, type: vtype };
     return { passed: true, type: vtype };
   }
 
   if (vtype === 'command_exit_zero') {
     if (!result) return { passed: false, reason: '缺少执行结果', type: vtype };
     if (!result.success) return { passed: false, reason: `命令执行失败: ${result.failureReason ?? '未知'}`, type: vtype };
+    const exitedZero = result.toolResults?.some((tool) => {
+      if (!tool.ok || tool.toolName !== 'run_command' || !tool.data || typeof tool.data !== 'object' || Array.isArray(tool.data)) return false;
+      return (tool.data as Record<string, unknown>).exitCode === 0;
+    });
+    if (!exitedZero) return { passed: false, reason: '没有成功退出码为 0 的 run_command 结果', type: vtype };
     return { passed: true, type: vtype };
   }
 
   if (vtype === 'git_no_conflict') {
-    // 没有 git_diff_hunk 包含 "<<<<<<<" 或 ">>>>>>>" 就通过
-    const conflict = step.evidence_refs.some(
-      (e) => e.kind === 'git_diff_hunk' && /^(<<<<<<<|>>>>>>>|=======)/m.test(e.description ?? ''),
-    );
-    if (conflict) return { passed: false, reason: '存在 git 冲突标记', type: vtype };
+    const statusResult = result?.toolResults?.find((tool) => tool.toolName === 'git_status' && tool.ok);
+    if (!statusResult || statusResult.truncated || !statusResult.data || typeof statusResult.data !== 'object' || Array.isArray(statusResult.data)) {
+      return { passed: false, reason: '缺少完整的 git_status 结果，无法验证冲突状态', type: vtype };
+    }
+    const entries = (statusResult.data as Record<string, unknown>).entries;
+    if (!Array.isArray(entries)) return { passed: false, reason: 'git_status 结果缺少文件状态', type: vtype };
+    const hasUnmergedPath = entries.some((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+      const status = (entry as Record<string, unknown>).status;
+      return typeof status === 'string' && (status.includes('U') || status === 'AA' || status === 'DD');
+    });
+    if (hasUnmergedPath) return { passed: false, reason: 'Git 状态中存在未合并文件', type: vtype };
+
+    const diffResult = result?.toolResults?.find((tool) => tool.toolName === 'git_diff' && tool.ok);
+    if (!diffResult || diffResult.truncated || !diffResult.data || typeof diffResult.data !== 'object' || Array.isArray(diffResult.data)) {
+      return { passed: false, reason: '缺少完整的 git_diff 结果，无法验证冲突标记', type: vtype };
+    }
+    const diffData = diffResult.data as Record<string, unknown>;
+    if (diffData.complete !== true || diffData.hasConflictMarkers !== false) {
+      return { passed: false, reason: 'git_diff 未明确证明不存在冲突标记', type: vtype };
+    }
     return { passed: true, type: vtype };
   }
 
   if (vtype === 'custom') {
-    // custom 验证交给外部——默认通过
-    return { passed: true, type: vtype };
+    return { passed: false, reason: '尚未注册 custom 验证器', type: vtype };
   }
 
   return { passed: false, reason: `未知验证类型: ${vtype}`, type: vtype };
+}
+
+function normalizePath(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }

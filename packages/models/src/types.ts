@@ -27,6 +27,8 @@ export interface ModelConfig {
   baseUrl: string;
   /** API Key。禁止写入日志、会话与审计。 */
   apiKey?: string;
+  /** Key 所来自的环境变量名（仅用于 `/key` 落盘时对齐，不参与请求） */
+  apiKeyEnv?: string;
   /** 模型名，例如 deepseek-chat / qwen2.5-coder-32b-instruct */
   model: string;
   /** 上下文窗口（token），用于预算管理 */

@@ -381,21 +381,29 @@ export class ToolDispatcher {
   ): Promise<ToolOutcome<JsonValue>> {
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
+    const toolController = new AbortController();
 
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
+        toolController.abort();
         reject(new ForgeError('TOOL_TIMEOUT', `工具 ${tool.name} 执行超过 ${tool.timeoutMs}ms`, { retryable: true }));
       }, tool.timeoutMs);
       timer.unref?.();
     });
 
     const abortPromise = new Promise<never>((_resolve, reject) => {
-      onAbort = () => reject(new ForgeError('ABORTED', '工具执行已被取消'));
+      onAbort = () => {
+        toolController.abort();
+        reject(new ForgeError('ABORTED', '工具执行已被取消'));
+      };
       if (signal.aborted) onAbort();
       else signal.addEventListener('abort', onAbort, { once: true });
     });
 
-    const execution = Promise.resolve().then(() => tool.execute(input, ctx));
+    const execution = Promise.resolve().then(() => {
+      if (toolController.signal.aborted) throw new ForgeError('ABORTED', '工具执行已被取消');
+      return tool.execute(input, { ...ctx, signal: toolController.signal });
+    });
     // 防止超时/取消后工具仍 reject 造成 unhandledRejection
     execution.catch(() => undefined);
 

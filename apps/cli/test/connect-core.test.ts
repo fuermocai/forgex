@@ -9,13 +9,15 @@ import {
   buildConfig,
   findModelPreset,
   maskKey,
+  persistApiKey,
   readExistingConfig,
   resolveProvider,
   saveConnectionConfig,
   testConnectivity,
+  writeCredential,
   writeModelSelection,
 } from '../src/runtime/connect-core.js';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -122,15 +124,100 @@ describe('配置读写', () => {
     }
   });
 
-  it('writeModelSelection 在没有配置文件时返回 false', () => {
-    expect(
-      writeModelSelection(null, {
-        model: 'm',
-        baseUrl: 'http://x',
-        contextWindow: 1024,
-        maxOutputTokens: 256,
-      }),
-    ).toBe(false);
+  it('writeModelSelection 在配置文件不存在时创建它（含默认 security/session/agent）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'forgex-connect-'));
+    try {
+      const path = join(dir, 'nested', 'config.json');
+      const ok = writeModelSelection(path, {
+        model: 'deepseek-flash',
+        baseUrl: 'https://api.deepseek.com',
+        contextWindow: 1_000_000,
+        maxOutputTokens: 8192,
+      });
+      expect(ok).toBe(true);
+
+      const written = JSON.parse(await readFile(path, 'utf8')) as Record<string, any>;
+      expect(written.model.model).toBe('deepseek-flash');
+      expect(written.model.contextWindow).toBe(1_000_000);
+      // apiKeyEnv 跟随 baseUrl 反查预设：DeepSeek 端点就该是 DEEPSEEK_API_KEY，
+      // 否则 /key 落盘位置和配置声明不一致，下次启动读不到
+      expect(written.model.apiKeyEnv).toBe('DEEPSEEK_API_KEY');
+      expect(written.security.mode).toBe('standard');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writeModelSelection 优先使用调用方给的 apiKeyEnv（保证存哪读哪）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'forgex-connect-'));
+    try {
+      const path = join(dir, 'config.json');
+      const ok = writeModelSelection(path, {
+        model: 'deepseek-flash',
+        baseUrl: 'https://api.deepseek.com',
+        contextWindow: 1_000_000,
+        maxOutputTokens: 8192,
+        apiKeyEnv: 'FORGEX_API_KEY',
+      });
+      expect(ok).toBe(true);
+
+      const written = JSON.parse(await readFile(path, 'utf8')) as Record<string, any>;
+      // 显式指定时不按 baseUrl 反查（否则 /key 存到 FORGEX_API_KEY、配置却指向
+      // DEEPSEEK_API_KEY，重启后环境变量取不到，Key 就"消失"了）
+      expect(written.model.apiKeyEnv).toBe('FORGEX_API_KEY');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('凭据文件（Linux/macOS 的 Key 持久化）', () => {
+  it('writeCredential 追加多条并保持 600 权限', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'forgex-cred-'));
+    try {
+      const path = join(dir, '.forgex', 'credentials.json');
+      expect(writeCredential('DEEPSEEK_API_KEY', 'sk-1', path)).toBe(true);
+      expect(writeCredential('FORGEX_API_KEY', 'sk-2', path)).toBe(true);
+      // 覆盖同名 Key 不应丢掉其他 Key
+      expect(writeCredential('DEEPSEEK_API_KEY', 'sk-3', path)).toBe(true);
+
+      const data = JSON.parse(await readFile(path, 'utf8')) as { keys: Record<string, string> };
+      expect(data.keys).toEqual({ DEEPSEEK_API_KEY: 'sk-3', FORGEX_API_KEY: 'sk-2' });
+
+      if (process.platform !== 'win32') {
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('凭据文件是坏 JSON 时覆盖写入而不是抛错', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'forgex-cred-'));
+    try {
+      const path = join(dir, 'credentials.json');
+      await writeFile(path, '{ not json', 'utf8');
+      expect(writeCredential('DEEPSEEK_API_KEY', 'sk-new', path)).toBe(true);
+      const data = JSON.parse(await readFile(path, 'utf8')) as { keys: Record<string, string> };
+      expect(data.keys.DEEPSEEK_API_KEY).toBe('sk-new');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('persistApiKey 在所有平台都写同一份凭据文件（重开即生效）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'forgex-cred-'));
+    try {
+      const path = join(dir, '.forgex', 'credentials.json');
+      const result = persistApiKey('DEEPSEEK_API_KEY', 'sk-persist', { path });
+
+      expect(result.ok).toBe(true);
+      expect(result.hint).toBe(path);
+      const data = JSON.parse(await readFile(path, 'utf8')) as { keys: Record<string, string> };
+      expect(data.keys.DEEPSEEK_API_KEY).toBe('sk-persist');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

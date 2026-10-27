@@ -63,12 +63,20 @@ export class BudgetTracker {
 
   constructor(limits: Partial<BudgetLimits> = {}) {
     this.limits = { ...DEFAULT_BUDGET_LIMITS, ...limits };
+    for (const [name, value] of Object.entries(this.limits)) {
+      if (!Number.isFinite(value) || value <= 0 || (name !== 'maxTokens' && name !== 'maxTimeMs' && !Number.isInteger(value))) {
+        throw new ForgeError('CONFIG_INVALID', `预算配置 ${name} 必须是正数${name === 'maxTokens' || name === 'maxTimeMs' ? '' : '整数'}`);
+      }
+    }
     this.startTime = Date.now();
     this.usage = { tokens: 0, timeMs: 0, toolCalls: 0, modelCalls: 0, steps: 0 };
   }
 
   /** 增加 Token 消耗 */
   addTokens(n: number): void {
+    if (!Number.isFinite(n) || n < 0) {
+      throw new ForgeError('INTERNAL', '模型 token 用量必须是有限的非负数');
+    }
     this.usage.tokens += n;
     this.check();
   }
@@ -114,7 +122,7 @@ export class BudgetTracker {
     for (const [limitKey, usageKey, label] of checks) {
       const limit = this.limits[limitKey];
       const used = this.usage[usageKey];
-      if (used >= limit) {
+      if (used > limit) {
         throw new ForgeError(
           'BUDGET_EXCEEDED',
           `${label}耗尽：已用 ${used}/${limit}，请追加预算或终止任务`,
@@ -128,11 +136,11 @@ export class BudgetTracker {
   hasBudget(): boolean {
     this.refreshTime();
     return (
-      this.usage.tokens < this.limits.maxTokens &&
-      this.usage.timeMs < this.limits.maxTimeMs &&
-      this.usage.toolCalls < this.limits.maxToolCalls &&
-      this.usage.modelCalls < this.limits.maxModelCalls &&
-      this.usage.steps < this.limits.maxSteps
+      this.usage.tokens <= this.limits.maxTokens &&
+      this.usage.timeMs <= this.limits.maxTimeMs &&
+      this.usage.toolCalls <= this.limits.maxToolCalls &&
+      this.usage.modelCalls <= this.limits.maxModelCalls &&
+      this.usage.steps <= this.limits.maxSteps
     );
   }
 

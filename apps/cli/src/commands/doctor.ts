@@ -12,8 +12,9 @@ import { stdout } from 'node:process';
 import { getMemory, listProcesses } from '@forgex/devops';
 import { createBuiltinTools, ToolRegistry } from '@forgex/tools';
 import { flagBool, flagString, type ParsedArgs } from '../args.js';
-import { loadConfig } from '../config/load-config.js';
+import { loadConfig, type ApiKeySource } from '../config/load-config.js';
 import { PERMISSION_MODE_LABELS } from '../config/permission-mode.js';
+import { maskKey } from '../runtime/connect-core.js';
 
 type Status = 'ok' | 'warn' | 'fail';
 
@@ -59,8 +60,24 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
       name: '模型配置',
       status: loaded.modelConfigured ? 'ok' : 'warn',
       detail: loaded.modelConfigured
-        ? `${loaded.config.model.model} @ ${loaded.config.model.baseUrl}（API Key: ${loaded.config.model.apiKey ? '已配置' : '未配置'}）`
+        ? `${loaded.config.model.model} @ ${loaded.config.model.baseUrl}`
         : '未配置 baseUrl/model，chat/run 不可用',
+    });
+    // Key 单独一项：既能回答"到底配没配"，也能回答"重启后从哪读的"
+    // ——排查「填了一次重开又没了」时，看来源比看有没有更直接。
+    const apiKey = loaded.config.model.apiKey;
+    const keyEnv = loaded.config.model.apiKeyEnv ?? 'FORGEX_API_KEY';
+    const sourceLabel: Record<Exclude<ApiKeySource, null>, string> = {
+      env: '环境变量',
+      credentials: `凭据文件 ${loaded.credentialsPath}`,
+      file: '配置文件明文（建议改用 /key 或环境变量）',
+    };
+    checks.push({
+      name: 'API Key',
+      status: apiKey ? (loaded.apiKeySource === 'file' ? 'warn' : 'ok') : 'warn',
+      detail: apiKey
+        ? `${maskKey(apiKey)}（${loaded.apiKeySource ? sourceLabel[loaded.apiKeySource] : '来源未知'}）`
+        : `未配置：/key <API Key> 或 export ${keyEnv}=...（凭据文件路径 ${loaded.credentialsPath}）`,
     });
     // 权限模式直接决定"能不能动手"，自检时必须让它可见：yolo 单独告警
     checks.push({

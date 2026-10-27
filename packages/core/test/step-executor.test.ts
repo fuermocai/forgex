@@ -43,6 +43,33 @@ function makePlan(mgr: PlanManager, maxAttempts?: number) {
   return mgr.createPlan({ user_request: '测试请求', steps: [step] });
 }
 
+/**
+ * 可重试的失败：模型层瞬时错误，且本轮没有任何工具调用（= 还没产生副作用）。
+ * 这是唯一允许自动重放的失败形态。
+ */
+function retryableFailure(): LoopResult {
+  return {
+    text: '',
+    reason: 'error',
+    iterations: 1,
+    toolCalls: 0,
+    toolResults: [],
+    error: { code: 'PROVIDER_TIMEOUT', message: '上游超时', retryable: true },
+  } as unknown as LoopResult;
+}
+
+/** 不可重试的失败：鉴权错误这类重试也没用的错误 */
+function fatalFailure(toolResults?: LoopResult['toolResults']): LoopResult {
+  return {
+    text: '',
+    reason: 'error',
+    iterations: 1,
+    toolCalls: toolResults?.length ?? 0,
+    ...(toolResults ? { toolResults } : {}),
+    error: { code: 'AUTH_INVALID', message: 'API Key 无效', retryable: false },
+  } as unknown as LoopResult;
+}
+
 describe('StepExecutor 状态机合规性', () => {
   it('pending 步骤直接执行：自动推进 ready 并成功完成', async () => {
     const mgr = new PlanManager();
@@ -57,7 +84,7 @@ describe('StepExecutor 状态机合规性', () => {
     expect(mgr.getPlan(plan.plan_id).steps[0]!.status).toBe('completed');
   });
 
-  it('首次失败第二次成功：重试走 failed → ready → running 合法转移', async () => {
+  it('可重试的瞬时失败：重试走 failed → ready → running 合法转移并最终成功', async () => {
     const mgr = new PlanManager();
     const plan = makePlan(mgr, 3);
     let calls = 0;
@@ -66,7 +93,7 @@ describe('StepExecutor 状态机合规性', () => {
       agent: {
         run: async () => {
           calls += 1;
-          if (calls === 1) throw new Error('首次失败');
+          if (calls === 1) return retryableFailure();
           return okResult('恢复成功');
         },
       },
@@ -75,6 +102,8 @@ describe('StepExecutor 状态机合规性', () => {
     expect(result.final_status).toBe('completed');
     expect(result.attemptsUsed).toBe(2);
     expect(calls).toBe(2);
+    // 重试前必须回到 ready，否则 markStepRunning 会因非法转移失败
+    expect(mgr.getPlan(plan.plan_id).steps[0]!.status).toBe('completed');
   });
 
   it('重试预算耗尽：final_status=failed 且 attemptsUsed=max_attempts', async () => {
@@ -86,7 +115,7 @@ describe('StepExecutor 状态机合规性', () => {
       agent: {
         run: async () => {
           calls += 1;
-          throw new Error('持续失败');
+          return retryableFailure();
         },
       },
     });
@@ -99,6 +128,51 @@ describe('StepExecutor 状态机合规性', () => {
     expect(step.attempts).toBe(2); // 每次失败尝试都应累加
   });
 
+  it('不可重试的失败（如鉴权错误）不消耗重试预算', async () => {
+    const mgr = new PlanManager();
+    const plan = makePlan(mgr, 3);
+    let calls = 0;
+    const executor = new StepExecutor({
+      planManager: mgr,
+      agent: {
+        run: async () => {
+          calls += 1;
+          return fatalFailure();
+        },
+      },
+    });
+    const result = await executor.executeStep(plan.plan_id, plan.steps[0]!.step_id);
+    expect(result.final_status).toBe('failed');
+    expect(result.attemptsUsed).toBe(1);
+    expect(calls).toBe(1);
+    expect(result.execution_result?.failureReason).toContain('AgentLoop 终止原因: error');
+    expect(mgr.getPlan(plan.plan_id).steps[0]!.status).toBe('failed');
+  });
+
+  it('已产生工具调用的失败即使标记可重试也不重放（避免副作用执行两遍）', async () => {
+    const mgr = new PlanManager();
+    const plan = makePlan(mgr, 3);
+    let calls = 0;
+    const executor = new StepExecutor({
+      planManager: mgr,
+      agent: {
+        run: async () => {
+          calls += 1;
+          return fatalFailure([
+            {
+              toolName: 'write_file',
+              result: { ok: true, summary: '已写入', truncated: false, durationMs: 1, bytes: 10 },
+            },
+          ]);
+        },
+      },
+    });
+    const result = await executor.executeStep(plan.plan_id, plan.steps[0]!.step_id);
+    expect(result.final_status).toBe('failed');
+    expect(result.attemptsUsed).toBe(1);
+    expect(calls).toBe(1);
+  });
+
   it('globalMaxAttempts 收紧 step.max_attempts', async () => {
     const mgr = new PlanManager();
     const plan = makePlan(mgr, 5);
@@ -109,7 +183,7 @@ describe('StepExecutor 状态机合规性', () => {
       agent: {
         run: async () => {
           calls += 1;
-          throw new Error('失败');
+          return retryableFailure();
         },
       },
     });
@@ -142,14 +216,34 @@ describe('StepExecutor 状态机合规性', () => {
     expect(mgr.getPlan(plan.plan_id).steps[0]!.status).toBe('cancelled');
   });
 
-  it('未注入 agent：按失败处理且走完整重试预算', async () => {
+  it('未注入 agent：直接判失败且不重试（重试也没有执行者）', async () => {
     const mgr = new PlanManager();
     const plan = makePlan(mgr, 2);
     const executor = new StepExecutor({ planManager: mgr });
     const result = await executor.executeStep(plan.plan_id, plan.steps[0]!.step_id);
     expect(result.final_status).toBe('failed');
-    expect(result.attemptsUsed).toBe(2);
+    expect(result.attemptsUsed).toBe(1);
     expect(result.execution_result?.failureReason).toContain('未注入 agent');
+  });
+
+  it('AgentLoop 抛异常：当作不可重试失败，只尝试一次', async () => {
+    const mgr = new PlanManager();
+    const plan = makePlan(mgr, 3);
+    let calls = 0;
+    const executor = new StepExecutor({
+      planManager: mgr,
+      agent: {
+        run: async () => {
+          calls += 1;
+          throw new Error('provider 构造失败');
+        },
+      },
+    });
+    const result = await executor.executeStep(plan.plan_id, plan.steps[0]!.step_id);
+    expect(result.final_status).toBe('failed');
+    expect(result.attemptsUsed).toBe(1);
+    expect(calls).toBe(1);
+    expect(result.execution_result?.failureReason).toContain('provider 构造失败');
   });
 
   it('step_id 不存在：直接返回 failed，不抛异常', async () => {

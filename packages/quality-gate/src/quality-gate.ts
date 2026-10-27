@@ -29,6 +29,9 @@ export class QualityGate {
   private readonly securityScanner?: SecurityScanner;
 
   constructor(options: QualityGateOptions) {
+    if (!options.testRunner && !options.staticAnalyzer && !options.securityScanner) {
+      throw new ForgeError('CONFIG_INVALID', '质量门禁至少需要配置一个检查阶段');
+    }
     this.testRunner = options.testRunner;
     this.staticAnalyzer = options.staticAnalyzer;
     this.securityScanner = options.securityScanner;

@@ -33,9 +33,11 @@ import {
   workflowNowIso,
   computeWorkflowState,
   isWorkflowTerminal,
+  WORKFLOW_NODE_STATUSES,
 } from '../types.js';
 import { WorkflowStateMachine } from './state-machine.js';
 import { WorkflowCheckpoint, buildCheckpointRecord } from './checkpoint.js';
+import { WorkflowValidator } from '../validation/workflow-validator.js';
 
 /* ------------------------------------------------------------------ */
 /* NodeExecutor：节点执行器接口                                          */
@@ -103,6 +105,7 @@ export class WorkflowRunner {
   private readonly signal?: AbortSignal;
   private readonly maxSteps: number;
   private readonly stateMachine = new WorkflowStateMachine();
+  private readonly validator = new WorkflowValidator();
 
   constructor(options: WorkflowRunnerOptions) {
     this.nodeExecutor = options.nodeExecutor;
@@ -119,6 +122,15 @@ export class WorkflowRunner {
    * @returns 执行报告 + 最终节点状态
    */
   async run(def: WorkflowDefinition, existingInstanceId?: string): Promise<WorkflowRunResult> {
+    const validation = this.validator.validate(def);
+    if (!validation.ok) {
+      throw new ForgeError(
+        'WORKFLOW_INVALID',
+        `工作流定义校验失败: ${validation.errors.map((error) => error.message).join('; ')}`,
+        { details: { workflowId: def.id, errors: validation.errors } },
+      );
+    }
+
     const workflowInstanceId = existingInstanceId ?? newWorkflowInstanceId();
     const started = Date.now();
 
@@ -137,11 +149,35 @@ export class WorkflowRunner {
       }));
     }
 
+    // 节点在上次运行时处于 running，说明进程可能在副作用发生后、结果落盘前崩溃。
+    // 不自动重放：调用方必须先核对外部状态，再创建新的实例继续，避免重复部署/写入等操作。
+    const interrupted = nodes.filter((node) => node.status === 'running');
+    if (interrupted.length > 0) {
+      for (const node of interrupted) {
+        this.stateMachine.block(node, '上次运行中断；请先核对外部副作用，再决定是否重试');
+      }
+      this.persistCheckpoint(workflowInstanceId, def, nodes);
+      const report = this.buildReport(
+        workflowInstanceId,
+        def,
+        nodes,
+        computeWorkflowState(nodes),
+        Date.now() - started,
+        0,
+      );
+      report.error = '检测到中断中的节点，已暂停自动恢复以避免重复执行副作用';
+      return { report, nodes };
+    }
+
     const ctx: WorkflowContext = {
       workflowInstanceId,
       workflowId: def.id,
       signal: this.signal,
-      nodeResults: new Map(),
+      nodeResults: new Map(
+        nodes
+          .filter((node) => node.status === 'completed' && node.result)
+          .map((node) => [node.id, node.result!] as const),
+      ),
     };
 
     let stepsExecuted = 0;
@@ -162,7 +198,7 @@ export class WorkflowRunner {
       stepsExecuted++;
 
       // 执行节点
-      await this.executeNode(readyNode, nodes, ctx);
+      await this.executeNode(readyNode, nodes, ctx, def);
 
       // 持久化检查点
       this.persistCheckpoint(workflowInstanceId, def, nodes);
@@ -200,6 +236,16 @@ export class WorkflowRunner {
     const record = this.checkpoint.load(instanceId);
     if (!record) return null;
 
+    if (
+      typeof record !== 'object' ||
+      !Array.isArray(record.nodes) ||
+      record.nodes.some((node) => !node || typeof node !== 'object' || typeof node.id !== 'string')
+    ) {
+      throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '检查点格式无效或已损坏', {
+        details: { instanceId },
+      });
+    }
+
     // 版本兼容性校验
     if (record.workflow_version !== def.version) {
       throw new ForgeError(
@@ -209,8 +255,55 @@ export class WorkflowRunner {
       );
     }
 
-    // 恢复节点状态（深拷贝）
-    return record.nodes.map((n) => ({ ...n }));
+    if (record.workflow_id !== def.id) {
+      throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '检查点与工作流定义不匹配或已损坏', {
+        details: { workflowId: def.id, checkpointWorkflowId: record.workflow_id, instanceId },
+      });
+    }
+    const expectedNodeIds = new Set(def.nodes.map((node) => node.id));
+    const restoredNodeIds = record.nodes.map((node) => node.id);
+    if (
+      restoredNodeIds.length !== expectedNodeIds.size ||
+      new Set(restoredNodeIds).size !== expectedNodeIds.size ||
+      restoredNodeIds.some((nodeId) => !expectedNodeIds.has(nodeId))
+    ) {
+      throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '检查点节点与当前工作流定义不一致', {
+        details: { workflowId: def.id, instanceId },
+      });
+    }
+
+    const restoredById = new Map(record.nodes.map((node) => [node.id, node]));
+    for (const expected of def.nodes) {
+      const restored = restoredById.get(expected.id);
+      if (
+        !restored ||
+        restored.type !== expected.type ||
+        JSON.stringify(restored.dependencies) !== JSON.stringify(expected.dependencies) ||
+        !WORKFLOW_NODE_STATUSES.includes(restored.status) ||
+        !Number.isInteger(restored.attempts) ||
+        restored.attempts < 0 ||
+        (restored.status === 'completed' && restored.result?.success !== true) ||
+        (restored.status === 'failed' && restored.result?.success === true)
+      ) {
+        throw new ForgeError('PLANNING_CHECKPOINT_ERROR', `检查点节点状态无效: ${expected.id}`, {
+          details: { workflowId: def.id, instanceId, nodeId: expected.id },
+        });
+      }
+    }
+
+    // 定义字段始终取当前定义，只从检查点恢复可变运行状态。
+    return def.nodes.map((expected) => {
+      const restored = restoredById.get(expected.id)!;
+      return {
+        ...expected,
+        status: restored.status,
+        attempts: restored.attempts,
+        result: restored.result,
+        block_reason: restored.block_reason,
+        created_at: restored.created_at,
+        updated_at: restored.updated_at,
+      };
+    });
   }
 
   /** 持久化检查点 */
@@ -252,11 +345,18 @@ export class WorkflowRunner {
   }
 
   /** 执行单个节点 */
-  private async executeNode(node: WorkflowNode, nodes: WorkflowNode[], ctx: WorkflowContext): Promise<void> {
+  private async executeNode(
+    node: WorkflowNode,
+    nodes: WorkflowNode[],
+    ctx: WorkflowContext,
+    def: WorkflowDefinition,
+  ): Promise<void> {
     const nodeStarted = Date.now();
 
     // 推进到 running
     this.stateMachine.start(node);
+    // 先记录 running，再触发任何外部副作用。崩溃恢复时会要求人工核对，不盲目重放。
+    this.persistCheckpoint(ctx.workflowInstanceId, def, nodes);
 
     try {
       let result: WorkflowNodeResult;
@@ -391,7 +491,9 @@ export class WorkflowRunner {
         success: n.result?.success,
         failureReason: n.result?.failureReason ?? n.block_reason,
       })),
-      ...(stepsExecuted >= this.maxSteps ? { error: `达到最大步骤数 ${this.maxSteps}，工作流被截断` } : {}),
+      ...(stepsExecuted >= this.maxSteps && nodes.some((node) => node.status === 'pending' || (node.status === 'failed' && this.stateMachine.canRetry(node)))
+        ? { error: `达到最大步骤数 ${this.maxSteps}，工作流被截断` }
+        : {}),
     };
   }
 }

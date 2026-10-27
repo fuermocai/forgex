@@ -88,7 +88,7 @@ async function main(argv: string[]): Promise<number> {
 function printHelp(): void {
   stdout.write(
     [
-      `ForgeX ${VERSION} - 企业级 Coding + DevOps Agent`,
+      `ForgeX ${VERSION} - 会话式 Coding Agent`,
       '',
       '用法：forgex <命令> [选项]',
       '',

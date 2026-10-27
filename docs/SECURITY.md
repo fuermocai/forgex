@@ -79,6 +79,8 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
 
 所有文件工具（read/list/grep/edit/git/logs/run_command cwd）都通过 `ToolContext.workspace` 解析路径，禁止自行拼接。
 
+**威胁边界**：上述检查防止模型提交越界路径和静态符号链接逃逸；校验与后续文件系统调用仍是分开的路径操作，不能防御有能力并发替换工作区目录/符号链接的本机进程。处理不可信仓库或不可信本机进程时，应在容器/虚拟机等独立 OS 边界内运行；Rust 执行器本身也不是完整 OS 沙箱。
+
 ## 6. 审计
 
 审计事件（JSONL + SQLite）包含：
@@ -101,6 +103,7 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
 - Key 只进入 Provider 的 `Authorization` 头。
 - 不记录请求头、不记录完整请求体；错误信息只包含状态码与服务端摘要。
 - `forgex config` 输出 `***已配置***`，不会打印 Key。
+- `/connect` 与 `/key` 的持久化：三平台统一写 `~/.forgex/credentials.json`（强制 `600`）。该文件是**明文**，通过 `loadConfig` 兜底注入，优先级低于真实环境变量；不再写 Windows 用户环境变量（只对新终端生效，行为不一致且多一份注册表明文拷贝）。高合规场景应删除该文件，改为在启动脚本里 `export`。
 
 ## 8. 明确的安全限制
 

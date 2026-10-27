@@ -9,3 +9,6 @@ benchmark/results/
 target/
 .DS_Store
 *.tsbuildinfo
+
+# tsup 构建时在根目录生成的临时配置副本
+tsup.npm.config.bundled_*.mjs

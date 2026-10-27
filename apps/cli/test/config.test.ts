@@ -24,7 +24,7 @@ afterEach(async () => {
 
 describe('loadConfig', () => {
   it('无配置文件时使用默认值，且标记模型未配置', () => {
-    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, logger: silent });
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
 
     expect(loaded.configPath).toBeNull();
     expect(loaded.modelConfigured).toBe(false);
@@ -55,7 +55,7 @@ describe('loadConfig', () => {
     const loaded = loadConfig({
       cwd: dir,
       env: { DEEPSEEK_API_KEY: 'sk-test-key' },
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
 
@@ -77,7 +77,7 @@ describe('loadConfig', () => {
     const loaded = loadConfig({
       cwd: dir,
       env: { FORGEX_BASE_URL: 'https://b.example', FORGEX_MODEL: 'b', FORGEX_PERMISSION_MODE: 'trusted' },
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
 
@@ -98,7 +98,7 @@ describe('loadConfig', () => {
       cwd: dir,
       permissionMode: 'trusted',
       env: { FORGEX_PERMISSION_MODE: 'standard' },
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
 
@@ -111,7 +111,7 @@ describe('loadConfig', () => {
       cwd: dir,
       permissionMode: 'Read-Only',
       env: {},
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
     expect(loaded.config.security.mode).toBe('readonly');
@@ -119,14 +119,14 @@ describe('loadConfig', () => {
 
   it('命令行 --mode 非法时报 CONFIG_INVALID 并回显可选值', () => {
     expect(() =>
-      loadConfig({ cwd: dir, permissionMode: 'root', env: {}, skipGlobal: true, logger: silent }),
+      loadConfig({ cwd: dir, permissionMode: 'root', env: {}, skipGlobal: true, skipCredentials: true, logger: silent }),
     ).toThrowError(/--mode 取值非法: root.*readonly \/ standard \/ trusted \/ yolo/);
   });
 
   it('支持 FORGEX_API_KEY 直接提供 Key', () => {    const loaded = loadConfig({
       cwd: dir,
       env: { FORGEX_BASE_URL: 'https://x.example', FORGEX_MODEL: 'x', FORGEX_API_KEY: 'sk-direct' },
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
     expect(loaded.config.model.apiKey).toBe('sk-direct');
@@ -137,7 +137,7 @@ describe('loadConfig', () => {
     const loaded = loadConfig({
       cwd: dir,
       env: { DEEPSEEK_API_KEY: 'sk-deepseek' },
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
 
@@ -153,7 +153,7 @@ describe('loadConfig', () => {
     const loaded = loadConfig({
       cwd: dir,
       env: { OPENAI_API_KEY: 'sk-openai', FORGEX_MODEL: 'my-model', FORGEX_BASE_URL: 'https://custom.example' },
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
 
@@ -173,7 +173,7 @@ describe('loadConfig', () => {
     const loaded = loadConfig({
       cwd: dir,
       env: { OPENAI_API_KEY: 'sk-openai', DEEPSEEK_API_KEY: 'sk-deepseek' },
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
 
@@ -186,7 +186,7 @@ describe('loadConfig', () => {
     const loaded = loadConfig({
       cwd: dir,
       env: { DEEPSEEK_API_KEY: '   ' },
-      skipGlobal: true,
+      skipGlobal: true, skipCredentials: true,
       logger: silent,
     });
     expect(loaded.modelConfigured).toBe(false);
@@ -198,7 +198,7 @@ describe('loadConfig', () => {
       JSON.stringify({ session: { dbPath: '~/.forgex/test-sessions.db' } }),
       'utf8',
     );
-    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, logger: silent });
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
     expect(loaded.config.session.dbPath).toBe(join(homedir(), '.forgex', 'test-sessions.db'));
   });
 
@@ -210,9 +210,121 @@ describe('loadConfig', () => {
 
   it('配置文件 JSON 非法时报 CONFIG_INVALID', async () => {
     await writeFile(join(dir, 'forgex.config.json'), '{ not json', 'utf8');
-    expect(() => loadConfig({ cwd: dir, env: {}, skipGlobal: true, logger: silent })).toThrowError(
+    expect(() => loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent })).toThrowError(
       /不是合法 JSON/,
     );
+  });
+});
+
+describe('凭据文件兜底', () => {
+  it('环境变量缺失时从 credentials.json 注入 API Key', async () => {
+    const credentialsPath = join(dir, 'credentials.json');
+    await writeFile(credentialsPath, JSON.stringify({ keys: { DEEPSEEK_API_KEY: 'sk-from-file' } }), 'utf8');
+    await writeFile(
+      join(dir, 'forgex.config.json'),
+      JSON.stringify({
+        model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      }),
+      'utf8',
+    );
+
+    const loaded = loadConfig({
+      cwd: dir,
+      env: {},
+      skipGlobal: true,
+      credentialsPath,
+      logger: silent,
+    });
+
+    expect(loaded.config.model.apiKey).toBe('sk-from-file');
+    expect(loaded.sources.some((source) => source.startsWith('凭据文件'))).toBe(true);
+    // doctor / config 靠这个字段回答"重启后 Key 从哪读的"
+    expect(loaded.apiKeySource).toBe('credentials');
+    expect(loaded.credentialsPath).toBe(credentialsPath);
+  });
+
+  it('真实环境变量优先于凭据文件', async () => {
+    const credentialsPath = join(dir, 'credentials.json');
+    await writeFile(credentialsPath, JSON.stringify({ keys: { DEEPSEEK_API_KEY: 'sk-from-file' } }), 'utf8');
+    await writeFile(
+      join(dir, 'forgex.config.json'),
+      JSON.stringify({
+        model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      }),
+      'utf8',
+    );
+
+    const loaded = loadConfig({
+      cwd: dir,
+      env: { DEEPSEEK_API_KEY: 'sk-from-env' },
+      skipGlobal: true,
+      credentialsPath,
+      logger: silent,
+    });
+
+    expect(loaded.config.model.apiKey).toBe('sk-from-env');
+    expect(loaded.sources.some((source) => source.startsWith('凭据文件'))).toBe(false);
+    expect(loaded.apiKeySource).toBe('env');
+  });
+
+  it('Key 只写在配置文件里时来源标记为 file（应提示改用 /key）', async () => {
+    await writeFile(
+      join(dir, 'forgex.config.json'),
+      JSON.stringify({
+        model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'sk-in-config' },
+      }),
+      'utf8',
+    );
+
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+
+    expect(loaded.config.model.apiKey).toBe('sk-in-config');
+    expect(loaded.apiKeySource).toBe('file');
+  });
+
+  it('没有任何 Key 时来源为 null', () => {
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+
+    expect(loaded.config.model.apiKey).toBeUndefined();
+    expect(loaded.apiKeySource).toBeNull();
+  });
+
+  it('apiKeyEnv 指向的变量缺失时退回 FORGEX_API_KEY（否则表现为"Key 又没了"）', async () => {
+    await writeFile(
+      join(dir, 'forgex.config.json'),
+      JSON.stringify({
+        model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      }),
+      'utf8',
+    );
+
+    const loaded = loadConfig({
+      cwd: dir,
+      env: { FORGEX_API_KEY: 'sk-from-forgex-env' },
+      skipGlobal: true,
+      skipCredentials: true,
+      logger: silent,
+    });
+
+    expect(loaded.config.model.apiKey).toBe('sk-from-forgex-env');
+    // 配置里声明的变量名保持不变，运行时换 Key 时仍会写到这个位置
+    expect(loaded.config.model.apiKeyEnv).toBe('DEEPSEEK_API_KEY');
+  });
+
+  it('凭据文件损坏时忽略而不阻断启动', async () => {
+    const credentialsPath = join(dir, 'credentials.json');
+    await writeFile(credentialsPath, '{ not json', 'utf8');
+
+    const loaded = loadConfig({
+      cwd: dir,
+      env: {},
+      skipGlobal: true,
+      credentialsPath,
+      logger: silent,
+    });
+
+    expect(loaded.config.model.apiKey).toBeUndefined();
+    expect(loaded.sources.some((source) => source.startsWith('凭据文件'))).toBe(false);
   });
 });
 

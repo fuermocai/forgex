@@ -1,5 +1,7 @@
 /**
- * forgex run：单次任务执行（适合脚本、CI、管道）。
+ * forgex run：单次 Agent 回合（适合脚本、管道）。
+ *
+ * 退出码 0 表示 Agent 回合正常结束，不代表代码任务已通过测试或验收。
  *
  * 输入来源：
  *   forgex run "分析当前项目结构"
@@ -95,6 +97,8 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
           {
             sessionId: result.sessionId,
             reason: result.reason,
+            agentTurnStatus: result.reason === 'completed' ? 'completed' : 'incomplete',
+            taskVerification: 'not_performed',
             text: result.text,
             ...(result.error ? { error: result.error } : {}),
             metrics: result.metrics,
@@ -104,8 +108,13 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
         )}\n`,
       );
     } else {
+      const status = result.reason === 'completed'
+        ? '模型回合结束；任务未验证'
+        : result.reason === 'aborted'
+          ? '已取消'
+          : '未完成';
       stderr.write(
-        `[完成] 结束原因=${result.reason} 用时=${result.metrics.totalMs}ms ` +
+        `[${status}] 结束原因=${result.reason} 用时=${result.metrics.totalMs}ms ` +
           `模型=${result.metrics.modelCalls} 次 工具=${result.metrics.toolCalls} 次 tokens=${result.metrics.totalTokens}\n`,
       );
     }

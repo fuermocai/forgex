@@ -19,6 +19,7 @@ import { formatMs, redactText, type AgentEvent, type ApprovalRequest, type RunMe
 import { createProvider, type ModelConfig } from '@forgex/models';
 import type { ForgeRuntime } from '../runtime/create-runtime.js';
 import { switchModel as applyModelSwitch } from '../runtime/model-switch.js';
+import { applyApiKey, currentApiKeyEnv } from '../runtime/api-key.js';
 import { VERSION } from '../version.js';
 import type { ApprovalBridge } from './approval-bridge.js';
 import { applyInputKey, type EditKeyState } from './input-edit.js';
@@ -84,9 +85,10 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 
 const COMMANDS = [
   { name: '/models', desc: '切换模型（保留会话历史）' },
+  { name: '/key', desc: '填写 API Key（隐藏输入，回车即存）' },
   { name: '/mode', desc: '切换权限模式（readonly/standard/trusted/yolo）' },
   { name: '/plan', desc: '计划模式：只读，只出方案不改代码' },
-  { name: '/connect', desc: '连接模型 / 更新 API Key' },
+  { name: '/connect', desc: '连接模型向导（provider → baseUrl → Key → 模型）' },
   { name: '/context', desc: '查看上下文 token 用量' },
   { name: '/session', desc: '显示当前会话 ID' },
   { name: '/help', desc: '帮助与快捷键' },
@@ -96,9 +98,10 @@ const COMMANDS = [
 const HELP = [
   '命令',
   '  /models   切换模型（会话历史保留）',
+  '  /key      填写 API Key：/key（隐藏输入，推荐）或 /key sk-xxx（会立即校验连通性）',
   '  /mode     查看或切换权限模式：/mode standard、/mode plan、/mode agent',
   '  /plan     进入/退出计划模式（只读，只出计划不改代码）',
-  '  /connect  连接模型：校验 Key、持久化并立即生效',
+  '  /connect  连接模型向导：选提供方 → 确认 baseUrl → 输入 Key → 选模型',
   '  /context  显示上下文 token 估算',
   '  /session  显示会话 id',
   '  /help     显示帮助',
@@ -132,6 +135,8 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
   const [mode, setMode] = useState(agent.permissionMode);
   const [planMode, setPlanMode] = useState(agent.isPlanMode);
   const [wizard, setWizard] = useState<WizardStep | null>(null);
+  /** `/key` 不带参数时进入的隐藏输入态：输入内容以 • 显示，回车提交、Esc 取消 */
+  const [keyEntry, setKeyEntry] = useState(false);
   const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
@@ -165,7 +170,11 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
 
   const push = useCallback((kind: LineKind, text: string, extra?: { detail?: string; status?: ToolStatus }) => {
     counter.current += 1;
-    setLines((prev) => [...prev, { id: counter.current, kind, text, ...extra }]);
+    // id 必须在调用时就取定：setLines 的更新函数是在渲染阶段才执行的，
+    // 若在更新函数内部读 counter.current，同一 tick 里的多次 push（比如
+    // 启动时连续 push banner/notice）会读到同一个值，导致 React key 重复。
+    const id = counter.current;
+    setLines((prev) => [...prev, { id, kind, text, ...extra }]);
   }, []);
 
   useEffect(() => {
@@ -223,12 +232,20 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
 
     push('banner', `v${VERSION}`);
     push('notice', '输入消息开始，或输入 / 查看命令');
+    // 没有 Key 时直接给动作入口：只说"未配置"用户还得猜怎么配
+    if (!runtime.config.model.apiKey) {
+      push(
+        'notice',
+        `未检测到 API Key：输入 /connect 走向导，或 /key <API Key> 直接填写；` +
+          `也可以在 shell 里 export ${currentApiKeyEnv(runtime)}=...`,
+      );
+    }
 
     return () => {
       offEvent();
       offApproval();
     };
-  }, [agent, bridge, push]);
+  }, [agent, bridge, push, runtime]);
 
   /* ---------------- 模型切换 ---------------- */
 
@@ -238,7 +255,18 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
         const result = applyModelSwitch(runtime, name);
         setModelName(result.model);
         push('notice', `已切换模型: ${result.model} @ ${result.baseUrl}`);
-        push('notice', result.saved ? '已写入配置文件，下次启动保持该模型' : '未找到配置文件，本次切换仅在当前会话生效');
+        push(
+          'notice',
+          result.saved
+            ? `已写入配置文件 ${result.savedPath ?? ''}，下次启动保持该模型`.replace('  ', ' ')
+            : '未找到可写的配置文件，本次切换仅在当前会话生效',
+        );
+        if (!result.keyReady) {
+          push(
+            'notice',
+            `该模型需要 ${result.apiKeyEnv ?? 'API Key'}：输入 /key <API Key> 填一个（换提供方后旧 Key 不沿用）`,
+          );
+        }
       } catch (err) {
         push('error', `切换模型失败: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -283,6 +311,8 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
         baseUrl,
         model,
         apiKey,
+        // 与刚写进配置的 apiKeyEnv 对齐：否则本次会话里再执行 /key 会按旧名字落盘
+        apiKeyEnv: envName,
         ...(preset ? { contextWindow: preset.contextWindow, maxOutputTokens: preset.maxOutputTokens } : {}),
       };
       try {
@@ -296,7 +326,7 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
       push(
         'notice',
         `已连接 ${model}（${result.latencyMs}ms）| Key ${maskKey(apiKey)} | ` +
-          (persisted.ok ? `${envName} 已持久化` : `需手动设置：${persisted.hint}`),
+          (persisted.ok ? `${envName} 已持久化（${persisted.hint}）` : `需手动设置：${persisted.hint}`),
       );
       setConnecting(false);
     },
@@ -380,6 +410,54 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
     setMode(agent.permissionMode);
   }, [agent]);
 
+  /* ---------------- API Key 更新 ---------------- */
+
+  /**
+   * 落盘 Key 并立刻验一次连通性。
+   * `/key <sk-...>` 与 `/key`（隐藏输入）共用这一条路径，避免两处行为分叉。
+   */
+  const applyKey = useCallback(
+    (raw: string) => {
+      const key = raw.trim();
+      if (!key) {
+        push('notice', 'API Key 不能为空，已取消');
+        return;
+      }
+      try {
+        const result = applyApiKey(runtime, key);
+        push('notice', `API Key 已更新（${result.masked}）`);
+        push(
+          'notice',
+          result.saved
+            ? `已保存到 ${result.hint}（变量 ${result.envName}），重开会话自动读取`
+            : `未能自动保存：${result.hint}`,
+        );
+        if (!result.configSaved) {
+          push('notice', '配置文件写入失败：重启后模型与 baseUrl 可能回到默认值，请检查 ~/.forgex 是否可写');
+        }
+        // 顺手验一次：Key 打错时当场知道，比等到第一次对话报 401 好
+        setConnecting(true);
+        void testConnectivity({
+          baseUrl: runtime.config.model.baseUrl,
+          apiKey: key,
+          model: runtime.config.model.model,
+        })
+          .then((probe) => {
+            push(
+              probe.ok ? 'notice' : 'error',
+              probe.ok
+                ? `连通性正常（${probe.latencyMs}ms）`
+                : `连通性测试失败：${probe.reason}${probe.detail ? `（${probe.detail}）` : ''}`,
+            );
+          })
+          .finally(() => setConnecting(false));
+      } catch (err) {
+        push('error', `更新 API Key 失败: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    [push, runtime],
+  );
+
   /* ---------------- 斜杠命令 ---------------- */
 
   const handleSlash = useCallback(
@@ -461,6 +539,28 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
           setWizard({ step: 'pickModel' });
           return;
         }
+        case '/key': {
+          if (busy) {
+            push('notice', '当前任务运行中，无法更新 API Key');
+            return;
+          }
+          const envName = currentApiKeyEnv(runtime);
+          if (!arg) {
+            // 不带参数不再只是打印用法：直接进入隐藏输入态，避免 Key 明文留在屏幕/历史里
+            setKeyEntry(true);
+            push(
+              'notice',
+              [
+                `API Key 状态：${runtime.config.model.apiKey ? '已配置' : '未配置'}（环境变量 ${envName}）`,
+                '请输入 API Key（输入内容以 • 显示），回车确认，Esc 取消',
+                '也可以直接 /key <API Key>，或 /connect 走完整向导',
+              ].join('\n'),
+            );
+            return;
+          }
+          applyKey(arg);
+          return;
+        }
         case '/connect': {
           if (busy) {
             push('notice', '当前任务运行中，无法重新连接');
@@ -473,11 +573,18 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
           push('error', `未知命令: ${name}（输入 /help 查看）`);
       }
     },
-    [agent, busy, exit, push, switchModel],
+    [agent, applyKey, busy, exit, push, runtime, switchModel],
   );
 
   const submit = useCallback(() => {
     const text = input.trim();
+    if (keyEntry) {
+      setInput('');
+      setCursor(0);
+      setKeyEntry(false);
+      applyKey(text);
+      return;
+    }
     if (wizard) {
       setInput('');
       setCursor(0);
@@ -519,7 +626,7 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
         setActiveTools([]);
         setContextTokens(agent.contextTokens());
       });
-  }, [advanceWizard, agent, busy, connecting, handleSlash, input, push, wizard]);
+  }, [advanceWizard, agent, applyKey, busy, connecting, handleSlash, input, keyEntry, push, wizard]);
 
   /* ---------------- 输入编辑 ---------------- */
 
@@ -536,7 +643,7 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
 
   /* ---------------- 键盘 ---------------- */
 
-  const palette = !wizard && !busy && !connecting && input.startsWith('/') && !input.includes(' ')
+  const palette = !wizard && !keyEntry && !busy && !connecting && input.startsWith('/') && !input.includes(' ')
     ? COMMANDS.filter((command) => command.name.startsWith(input.toLowerCase()))
     : [];
   const selectedPalette = palette[Math.min(paletteIndex, Math.max(0, palette.length - 1))];
@@ -593,6 +700,23 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
         setInput('');
         setCursor(0);
         push('notice', '已取消向导');
+        return;
+      }
+      editInput(char, key);
+      return;
+    }
+
+    // `/key` 的隐藏输入态：Enter 提交、Esc 取消，其余按键照常编辑
+    if (keyEntry) {
+      if (key.return) {
+        submit();
+        return;
+      }
+      if (key.escape) {
+        setKeyEntry(false);
+        setInput('');
+        setCursor(0);
+        push('notice', '已取消，API Key 保持不变');
         return;
       }
       editInput(char, key);
@@ -695,11 +819,17 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
               <>
                 {busy || connecting ? null : <Text inverse> </Text>}
                 <Text dimColor>
-                  {busy ? '运行中，Ctrl+C 取消' : connecting ? '连接中…' : '输入消息，/ 查看命令'}
+                  {keyEntry
+                    ? '输入 API Key（已隐藏），回车确认 / Esc 取消'
+                    : busy
+                      ? '运行中，Ctrl+C 取消'
+                      : connecting
+                        ? '连接中…'
+                        : '输入消息，/ 查看命令'}
                 </Text>
               </>
             ) : (
-              renderInput(input, cursor, false)
+              renderInput(input, cursor, keyEntry)
             )}
           </Box>
         </>
@@ -750,7 +880,7 @@ function LineView({ line }: { line: Line }): React.ReactElement {
             </Text>
             <Text dimColor>  {line.text}</Text>
           </Text>
-          <Text dimColor>企业级 Coding + DevOps Agent</Text>
+          <Text dimColor>会话式 Coding Agent</Text>
         </Box>
       );
     case 'user':

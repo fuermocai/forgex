@@ -21,6 +21,8 @@ export function configCommand(args: ParsedArgs, options: { cwd: string }): numbe
         configPath: loaded.configPath,
         sources: loaded.sources,
         modelConfigured: loaded.modelConfigured,
+        apiKeySource: loaded.apiKeySource,
+        credentialsPath: loaded.credentialsPath,
         model: { ...safeModel, ...(apiKey ? { apiKey: '***已配置***' } : {}) },
         security: loaded.config.security,
         session: loaded.config.session,

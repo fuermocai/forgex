@@ -7,9 +7,9 @@
  *   - 表结构：workflow_checkpoints(workflow_instance_id TEXT PK, snapshot_at TEXT, payload TEXT)。
  *
  * 持久化时机（由 WorkflowRunner 调用）：
- *   - 每个节点状态变化时（running / completed / failed / blocked / cancelled）；
+ *   - 执行节点前先保存 running，节点结束后再保存最终状态；
  *   - 工作流取消时；
- *   - 恢复时先 load checkpoint，决定从哪个 node_id 继续。
+ *   - 恢复时校验定义版本与节点集合；遇到 running 节点时暂停，避免重复副作用。
  */
 import { DatabaseSync } from 'node:sqlite';
 import { ForgeError } from '@forgex/shared';

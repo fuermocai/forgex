@@ -14,7 +14,7 @@
  *   4. 不引入 zod schema——本层是领域模型，校验留给 PlanManager / StepExecutor
  *      的运行时逻辑。
  */
-import { uuid } from '@forgex/shared';
+import { uuid, type JsonValue } from '@forgex/shared';
 
 /* ------------------------------------------------------------------ */
 /* TaskStatus 状态机                                                    */
@@ -137,6 +137,17 @@ export interface ExecutionResult {
   failureReason?: string;
   /** 最终模型摘要（供用户看） */
   summary?: string;
+  /** Agent 实际执行的工具结果，用于可验证的步骤验收 */
+  toolResults?: Array<{
+    toolName: string;
+    ok: boolean;
+    truncated: boolean;
+    data?: JsonValue;
+  }>;
+  /** 只有明确可重试的瞬时失败才应自动重放整个步骤 */
+  retryable?: boolean;
+  /** Agent 被用户取消时，步骤应进入 cancelled，而不是 failed */
+  cancelled?: boolean;
 }
 
 /** 证据引用（代码片段、日志行、Git commit、Docker 容器 ID 等） */

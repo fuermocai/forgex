@@ -141,15 +141,11 @@ export class SubAgentRunner {
     localEvents.on((event) => {
       // 跟踪资源消耗
       if (event.type === 'tool:end') {
-        limiter.recordToolCall();
+        limiter.checkTimeBudget();
         toolCallHistory.push({ name: event.name, input: { path: '' } as JsonValue, result: event.result });
         const ref = extractEvidenceRef(event.name, event.result);
         if (ref) evidenceRefs.push(ref);
         // 超预算时立即终止
-        if (limiter.isExceeded()) controller.abort();
-      }
-      if (event.type === 'metrics') {
-        limiter.recordTokens(event.metrics.totalTokens);
         if (limiter.isExceeded()) controller.abort();
       }
       // 转发给父任务（附加子代理 ID 便于区分）
@@ -185,8 +181,28 @@ export class SubAgentRunner {
       events: localEvents,
       sessionId: spec.parent_session_id ?? spec.subagent_id,
       maxIterations: budget.maxIterations,
+      onModelRequest: () => {
+        limiter.recordIteration();
+        if (limiter.isExceeded()) controller.abort();
+      },
+      onModelUsage: (tokens) => {
+        limiter.recordTokens(tokens);
+        if (limiter.isExceeded()) controller.abort();
+      },
+      beforeToolCalls: (count) => {
+        const allowed = limiter.reserveToolCalls(count);
+        if (!allowed) controller.abort();
+        return allowed;
+      },
       ...(this.logger ? { logger: this.logger } : {}),
     });
+
+    const budgetTimer = setTimeout(() => {
+      const elapsed = Math.round(limiter.snapshot().durationMs);
+      limiter.forceExceeded(`执行时间超过预算 ${budget.maxDurationMs}ms（实际 ${elapsed}ms）`);
+      controller.abort();
+    }, Math.max(1, budget.maxDurationMs));
+    budgetTimer.unref?.();
 
     // 7. 运行 AgentLoop
     const metrics = new MetricsCollector(spec.subagent_id);
@@ -201,6 +217,7 @@ export class SubAgentRunner {
       // 跑完后再检查一次（可能刚好超预算）
       limiter.checkTimeBudget();
     } catch (err) {
+      clearTimeout(budgetTimer);
       return this.buildFailureResult(
         spec,
         started,
@@ -213,6 +230,7 @@ export class SubAgentRunner {
 
     // 8. 检查是否因超预算被终止
     if (limiter.isExceeded()) {
+      clearTimeout(budgetTimer);
       return {
         subagent_id: spec.subagent_id,
         role: spec.role,
@@ -234,6 +252,7 @@ export class SubAgentRunner {
     // 9. 构造成功结果
     const success = loopResult.reason === 'completed';
     const cancelled = loopResult.reason === 'aborted';
+    clearTimeout(budgetTimer);
     return {
       subagent_id: spec.subagent_id,
       role: spec.role,

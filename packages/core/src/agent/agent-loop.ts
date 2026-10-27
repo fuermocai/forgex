@@ -46,6 +46,12 @@ export interface AgentLoopOptions {
   logger?: Logger;
   /** 每条新消息的持久化回调（Agent 注入 SessionStore） */
   persistMessage?: (message: ChatMessage) => void;
+  /** 子代理预算钩子：每次模型请求前调用 */
+  onModelRequest?: (iteration: number) => void;
+  /** 子代理预算钩子：模型用量返回后调用 */
+  onModelUsage?: (totalTokens: number) => void;
+  /** 可在工具执行前拒绝整批调用，避免越过子代理工具预算 */
+  beforeToolCalls?: (count: number) => boolean;
 }
 
 export interface LoopRunOptions {
@@ -61,6 +67,8 @@ export interface LoopResult {
   iterations: number;
   /** 本轮执行的工具调用总数 */
   toolCalls: number;
+  /** 已执行工具的结构化结果，供计划验证和子代理汇总使用 */
+  toolResults?: Array<{ toolName: string; result: ToolResult }>;
   error?: ToolErrorInfo;
 }
 
@@ -78,6 +86,9 @@ export class AgentLoop {
   private readonly repeatThreshold: number;
   private readonly logger: Logger | undefined;
   private readonly persistMessage: ((message: ChatMessage) => void) | undefined;
+  private readonly onModelRequest: ((iteration: number) => void) | undefined;
+  private readonly onModelUsage: ((totalTokens: number) => void) | undefined;
+  private readonly beforeToolCalls: ((count: number) => boolean) | undefined;
 
   constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -90,6 +101,9 @@ export class AgentLoop {
     this.repeatThreshold = Math.max(2, options.repeatThreshold ?? DEFAULT_REPEAT_THRESHOLD);
     this.logger = options.logger;
     this.persistMessage = options.persistMessage;
+    this.onModelRequest = options.onModelRequest;
+    this.onModelUsage = options.onModelUsage;
+    this.beforeToolCalls = options.beforeToolCalls;
   }
 
   /** 运行时切换模型（Provider 实例整体替换，下一轮请求生效） */
@@ -118,12 +132,17 @@ export class AgentLoop {
     let lastText = '';
     let iterations = 0;
     let totalToolCalls = 0;
+    const allToolResults: Array<{ toolName: string; result: ToolResult }> = [];
 
     for (let iteration = 1; iteration <= this.maxIterations; iteration += 1) {
       iterations = iteration;
 
       if (signal.aborted) {
-        return { text: lastText, reason: 'aborted', iterations, toolCalls: totalToolCalls };
+        return { text: lastText, reason: 'aborted', iterations: iteration - 1, toolCalls: totalToolCalls, toolResults: allToolResults };
+      }
+      this.onModelRequest?.(iteration);
+      if (signal.aborted) {
+        return { text: lastText, reason: 'aborted', iterations: iteration - 1, toolCalls: totalToolCalls, toolResults: allToolResults };
       }
 
       // 2. 构建上下文（必要时压缩）并做协议修复
@@ -187,6 +206,7 @@ export class AgentLoop {
           reason: aborted ? 'aborted' : 'error',
           iterations,
           toolCalls: totalToolCalls,
+          toolResults: allToolResults,
           error,
         };
       }
@@ -199,6 +219,7 @@ export class AgentLoop {
         completionTokens: response.usage.completionTokens,
         totalTokens: response.usage.totalTokens,
       });
+      this.onModelUsage?.(response.usage.totalTokens);
 
       const content = response.message.content ?? '';
       if (content.length > 0) lastText = content;
@@ -213,6 +234,17 @@ export class AgentLoop {
       this.append([assistantMessage]);
       this.events.emit({ type: 'assistant:message', text: content, toolCalls, ts: Date.now() });
 
+      // 预算或用户取消可能在模型请求期间触发。为模型已发出的调用补齐协议，
+      // 但不要在预算超限后继续执行工具。
+      if (signal.aborted) {
+        if (toolCalls.length > 0) {
+          const skipped = synthesizeResults(toolCalls, 'ABORTED', '模型请求期间任务被取消或预算耗尽');
+          this.appendToolMessages(toolCalls, skipped);
+          allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: skipped[index]! })));
+        }
+        return { text: content || lastText, reason: 'aborted', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
+      }
+
       if (response.finishReason === 'length') {
         this.events.emit({
           type: 'notice',
@@ -220,11 +252,46 @@ export class AgentLoop {
           message: '模型输出达到长度上限，内容可能被截断',
           ts: Date.now(),
         });
+        if (toolCalls.length > 0) {
+          // 被截断的参数可能不是完整 JSON，也不能因为部分调用看起来有效就产生副作用。
+          const skipped = synthesizeResults(toolCalls, 'OUTPUT_TRUNCATED', '模型输出达到长度上限，工具调用未执行');
+          this.appendToolMessages(toolCalls, skipped);
+          allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: skipped[index]! })));
+          return { text: content || lastText, reason: 'output_truncated', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
+        }
+      }
+
+      if (response.finishReason === 'content_filter') {
+        if (toolCalls.length > 0) {
+          const skipped = synthesizeResults(toolCalls, 'CONTENT_FILTERED', '模型响应被内容策略拦截，工具调用未执行');
+          this.appendToolMessages(toolCalls, skipped);
+          allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: skipped[index]! })));
+        }
+        return { text: content || lastText, reason: 'content_filtered', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
       }
 
       // 5. 无工具调用：本轮结束
       if (toolCalls.length === 0) {
-        return { text: content, reason: 'completed', iterations, toolCalls: totalToolCalls };
+        const truncated = response.finishReason === 'length';
+        if (!truncated && response.finishReason !== 'stop') {
+          const error = toToolErrorInfo(new ForgeError('PROVIDER_ERROR', `模型返回了未知结束原因: ${response.finishReason}`));
+          return { text: content || lastText, reason: 'error', iterations, toolCalls: totalToolCalls, toolResults: allToolResults, error };
+        }
+        return {
+          text: content,
+          reason: truncated ? 'output_truncated' : 'completed',
+          iterations,
+          toolCalls: totalToolCalls,
+          toolResults: allToolResults,
+        };
+      }
+
+      if (response.finishReason !== 'tool_calls' && response.finishReason !== 'stop') {
+        const skipped = synthesizeResults(toolCalls, 'INVALID_FINISH_REASON', `工具调用响应的结束原因无效: ${response.finishReason}`);
+        this.appendToolMessages(toolCalls, skipped);
+        allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: skipped[index]! })));
+        const error = toToolErrorInfo(new ForgeError('PROVIDER_ERROR', `工具调用响应的结束原因无效: ${response.finishReason}`));
+        return { text: content || lastText, reason: 'error', iterations, toolCalls: totalToolCalls, toolResults: allToolResults, error };
       }
 
       // 6. 重复调用检测：连续 repeatThreshold 次完全相同的调用集合
@@ -241,19 +308,29 @@ export class AgentLoop {
           message: `连续 ${this.repeatThreshold} 次相同的工具调用，已终止以避免死循环`,
           ts: Date.now(),
         });
-        this.appendToolMessages(toolCalls, synthesizeResults(toolCalls, 'LOOP_DETECTED', '检测到重复工具调用，已中止执行'));
+        const skipped = synthesizeResults(toolCalls, 'LOOP_DETECTED', '检测到重复工具调用，已中止执行');
+        this.appendToolMessages(toolCalls, skipped);
+        allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: skipped[index]! })));
         totalToolCalls += toolCalls.length;
-        return { text: lastText, reason: 'loop_detected', iterations, toolCalls: totalToolCalls };
+        return { text: lastText, reason: 'loop_detected', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
+      }
+
+      if (this.beforeToolCalls && !this.beforeToolCalls(toolCalls.length)) {
+        const skipped = synthesizeResults(toolCalls, 'SUBAGENT_BUDGET_EXCEEDED', '工具调用预算不足，未执行');
+        this.appendToolMessages(toolCalls, skipped);
+        allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: skipped[index]! })));
+        return { text: lastText, reason: 'aborted', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
       }
 
       // 7. 统一调度执行（并发、语义校验、策略、审批、审计都在 Dispatcher 内）
       const results = await this.dispatcher.executeMany(toolCalls, { sessionId: this.sessionId, signal });
       for (const result of results) metrics.recordTool(result);
+      allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: results[index]! })));
       this.appendToolMessages(toolCalls, results);
       totalToolCalls += toolCalls.length;
 
       if (signal.aborted) {
-        return { text: lastText, reason: 'aborted', iterations, toolCalls: totalToolCalls };
+        return { text: lastText, reason: 'aborted', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
       }
     }
 
@@ -264,7 +341,7 @@ export class AgentLoop {
       message: `已达到最大迭代次数 ${this.maxIterations}，本轮结束`,
       ts: Date.now(),
     });
-    return { text: lastText, reason: 'max_iterations', iterations, toolCalls: totalToolCalls };
+    return { text: lastText, reason: 'max_iterations', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
   }
 
   /** 追加消息并持久化 */

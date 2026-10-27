@@ -12,6 +12,7 @@ import { formatMs, type AgentEvent } from '@forgex/shared';
 import type { ForgeRuntime } from '../runtime/create-runtime.js';
 import { MODEL_PRESETS } from '../runtime/connect-core.js';
 import { switchModel } from '../runtime/model-switch.js';
+import { applyApiKey, currentApiKeyEnv } from '../runtime/api-key.js';
 import { parsePermissionMode, permissionModeHelp, permissionModeList } from '../config/permission-mode.js';
 import type { ApprovalBridge } from './approval-bridge.js';
 
@@ -49,6 +50,9 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
       'ForgeX 交互模式（纯文本）',
       `模型: ${runtime.config.model.model}  工作区: ${runtime.settings.workspaceRoots[0]}`,
       `权限模式: ${runtime.settings.mode}  会话: ${agent.sessionId}`,
+      ...(runtime.config.model.apiKey
+        ? []
+        : [`未检测到 API Key：输入 /key <API Key> 填写，或 export ${currentApiKeyEnv(runtime)}=...`]),
       '输入 /help 查看命令，Ctrl+C 取消当前任务，再按一次退出。',
       '',
     ].join('\n'),
@@ -125,16 +129,51 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
         const result = switchModel(runtime, target);
         stdout.write(
           `[提示] 已切换模型: ${result.model} @ ${result.baseUrl}` +
-            (result.saved ? '（已写入配置文件）' : '（仅本次会话生效）') +
+            (result.saved ? `（已写入 ${result.savedPath ?? '配置文件'}）` : '（仅本次会话生效）') +
             '\n',
         );
+        if (!result.keyReady) {
+          stdout.write(
+            `[提示] 该模型需要 ${result.apiKeyEnv ?? 'API Key'}：用 /key <API Key> 填一个（换提供方后旧 Key 不沿用）\n`,
+          );
+        }
       } catch (err) {
         stdout.write(`[错误] 切换模型失败: ${err instanceof Error ? err.message : String(err)}\n`);
       }
       continue;
     }
+    if (text === '/key' || text.startsWith('/key ')) {
+      const key = text.slice('/key'.length).trim();
+      const envName = currentApiKeyEnv(runtime);
+      if (!key) {
+        stdout.write(
+          [
+            `API Key 状态：${runtime.config.model.apiKey ? '已配置' : '未配置'}（环境变量 ${envName}）`,
+            '用法：/key <API Key>   直接替换当前模型的 Key',
+            `      export ${envName}=...   在 shell 里设置（优先级最高）`,
+            '',
+          ].join('\n'),
+        );
+        continue;
+      }
+      try {
+        const result = applyApiKey(runtime, key);
+        stdout.write(`[提示] API Key 已更新（${result.masked}）\n`);
+        stdout.write(
+          result.saved
+            ? `[提示] 已保存到 ${result.hint}（变量 ${result.envName}），重开会话自动读取\n`
+            : `[提示] 未能自动保存：${result.hint}\n`,
+        );
+        if (!result.configSaved) {
+          stdout.write('[提示] 配置文件写入失败：重启后模型与 baseUrl 可能回到默认值，请检查 ~/.forgex 是否可写\n');
+        }
+      } catch (err) {
+        stdout.write(`[错误] 更新 API Key 失败: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+      continue;
+    }
     if (text === '/connect') {
-      stdout.write('[提示] 纯文本模式不支持交互式向导，请退出后运行：forgex connect\n');
+      stdout.write('[提示] 纯文本模式不支持交互式向导，可用 /key <API Key> 直接填写；完整向导请运行：forgex connect\n');
       continue;
     }
 
@@ -143,13 +182,15 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
     try {
       const result = await agent.run(text, { signal: controller.signal });
       const metrics = result.metrics;
+      const status = result.reason === 'completed' ? '完成' : result.reason === 'aborted' ? '已取消' : '未完成';
       stdout.write(
-        `\n[完成] 结束原因=${result.reason} 用时=${formatMs(metrics.totalMs)} ` +
+        `\n[${status}] 结束原因=${result.reason} 用时=${formatMs(metrics.totalMs)} ` +
           `模型=${metrics.modelCalls} 次 工具=${metrics.toolCalls} 次 ` +
           `tokens=${metrics.totalTokens}\n`,
       );
-      if (result.reason !== 'completed' && result.error) {
-        stdout.write(`[错误] ${result.error.code}: ${result.error.message}\n`);
+      if (result.reason !== 'completed') {
+        if (result.error) stdout.write(`[错误] ${result.error.code}: ${result.error.message}\n`);
+        else stdout.write(`[提示] 本轮没有完成，请根据结束原因决定是否继续。\n`);
       }
     } catch (err) {
       stdout.write(`[错误] ${err instanceof Error ? err.message : String(err)}\n`);
@@ -204,9 +245,10 @@ function printHelp(): void {
     [
       '可用命令：',
       '  /models [模型名]  查看可用模型 / 切换模型',
+      '  /key <API Key>    直接填写或替换当前模型的 API Key',
       '  /mode [模式]      查看或切换权限模式（/mode plan、/mode agent 控制计划模式）',
       '  /plan             进入或退出计划模式（只读，只出计划）',
-      '  /connect          提示退出后运行 forgex connect',
+      '  /connect          提示退出后运行 forgex connect（完整向导）',
       '  /session          显示当前会话 id',
       '  /context          显示上下文 token 估算',
       '  /exit             退出',

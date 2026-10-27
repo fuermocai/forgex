@@ -255,7 +255,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     const message = (choice.message ?? {}) as Record<string, unknown>;
     const content = typeof message.content === 'string' ? message.content : '';
     const toolCalls = normalizeToolCalls(message.tool_calls);
-    const finishReason = typeof choice.finish_reason === 'string' ? choice.finish_reason : 'stop';
+    const finishReason = typeof choice.finish_reason === 'string' ? choice.finish_reason : 'unknown';
     const usage = normalizeUsage(json.usage);
     return {
       message: {
@@ -282,9 +282,43 @@ export class OpenAICompatibleProvider implements ModelProvider {
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
     let content = '';
-    let finishReason = 'stop';
+    let finishReason: string | undefined;
+    let sawDone = false;
     let usage: TokenUsage | undefined;
     const accs = new Map<number, AccumulatedToolCall>();
+
+    const processLine = (rawLine: string): void => {
+      const line = rawLine.trim();
+      if (!line || line.startsWith(':') || line.startsWith('event:') || !line.startsWith('data:')) return;
+      const payload = line.slice(5).trim();
+      if (!payload) return;
+      if (payload === '[DONE]') {
+        sawDone = true;
+        return;
+      }
+      let chunk: Record<string, unknown>;
+      try {
+        chunk = JSON.parse(payload) as Record<string, unknown>;
+      } catch {
+        // 个别网关会发送心跳 JSON 片段，忽略解析失败的行而不是中断整个流
+        return;
+      }
+      if (chunk.usage) usage = normalizeUsage(chunk.usage) ?? usage;
+      const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+      const first = choices[0] as Record<string, unknown> | undefined;
+      if (!first) return;
+      if (typeof first.finish_reason === 'string') finishReason = first.finish_reason;
+      const delta = (first.delta ?? {}) as Record<string, unknown>;
+      if (typeof delta.content === 'string' && delta.content.length > 0) {
+        onFirstToken();
+        content += delta.content;
+        handlers.onDelta?.(delta.content);
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        onFirstToken();
+        mergeToolCallDeltas(accs, delta.tool_calls);
+      }
+    };
 
     try {
       for (;;) {
@@ -296,54 +330,22 @@ export class OpenAICompatibleProvider implements ModelProvider {
           const rawLine = buffer.slice(0, newlineIndex).replace(/\r$/, '');
           buffer = buffer.slice(newlineIndex + 1);
           newlineIndex = buffer.indexOf('\n');
-          const line = rawLine.trim();
-          if (!line || line.startsWith(':') || line.startsWith('event:')) continue;
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
-          if (payload === '[DONE]') {
-            continue;
-          }
-          let chunk: Record<string, unknown>;
-          try {
-            chunk = JSON.parse(payload) as Record<string, unknown>;
-          } catch {
-            // 个别网关会发送心跳 JSON 片段，忽略解析失败的行而不是中断整个流
-            continue;
-          }
-          if (chunk.usage) usage = normalizeUsage(chunk.usage) ?? usage;
-          const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
-          const first = choices[0] as Record<string, unknown> | undefined;
-          if (!first) continue;
-          if (typeof first.finish_reason === 'string') finishReason = first.finish_reason;
-          const delta = (first.delta ?? {}) as Record<string, unknown>;
-          if (typeof delta.content === 'string' && delta.content.length > 0) {
-            onFirstToken();
-            content += delta.content;
-            handlers.onDelta?.(delta.content);
-          }
-          if (Array.isArray(delta.tool_calls)) {
-            onFirstToken();
-            mergeToolCallDeltas(accs, delta.tool_calls);
-          }
+          processLine(rawLine);
         }
       }
-      // 处理最后一行没有换行符的情况
-      if (buffer.trim().startsWith('data:')) {
-        const payload = buffer.trim().slice(5).trim();
-        if (payload && payload !== '[DONE]') {
-          try {
-            const chunk = JSON.parse(payload) as Record<string, unknown>;
-            if (chunk.usage) usage = normalizeUsage(chunk.usage) ?? usage;
-          } catch {
-            /* 同上，忽略 */
-          }
-        }
+      // 解码器和 SSE 行都可能在 EOF 时留下未完成片段，按正常路径处理。
+      buffer += decoder.decode();
+      if (buffer.length > 0) {
+        for (const rawLine of buffer.split('\n')) processLine(rawLine.replace(/\r$/, ''));
+      }
+      if (!finishReason && !sawDone) {
+        throw new ForgeError('PROVIDER_ERROR', '模型流在未收到结束标记时提前关闭', { retryable: true });
       }
     } finally {
       reader.releaseLock();
     }
 
-    return { content, toolCalls: flushToolCalls(accs), finishReason, usage };
+    return { content, toolCalls: flushToolCalls(accs), finishReason: finishReason ?? 'stop', usage };
   }
 }
 
@@ -368,14 +370,21 @@ function toWireMessage(message: ChatMessage): Record<string, unknown> {
 }
 
 function normalizeToolCalls(input: unknown): ToolCall[] {
-  if (!Array.isArray(input)) return [];
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) {
+    throw new ForgeError('PROVIDER_ERROR', '模型工具调用列表格式无效', { retryable: false });
+  }
   const out: ToolCall[] = [];
   input.forEach((item, index) => {
-    if (!item || typeof item !== 'object') return;
+    if (!item || typeof item !== 'object') {
+      throw new ForgeError('PROVIDER_ERROR', `模型工具调用 ${index} 格式无效`, { retryable: false });
+    }
     const rec = item as Record<string, unknown>;
     const fn = (rec.function ?? {}) as Record<string, unknown>;
     const name = typeof fn.name === 'string' ? fn.name : '';
-    if (!name) return;
+    if (!name) {
+      throw new ForgeError('PROVIDER_ERROR', `模型工具调用 ${index} 缺少函数名`, { retryable: false });
+    }
     const args =
       typeof fn.arguments === 'string'
         ? fn.arguments
@@ -387,7 +396,6 @@ function normalizeToolCalls(input: unknown): ToolCall[] {
       type: 'function',
       function: { name, arguments: args },
     });
-    void index;
   });
   return out;
 }
@@ -412,10 +420,12 @@ export function mergeToolCallDeltas(
 
 /** 把累积的 tool_calls 转为协议消息；缺少 id 时兜底生成 */
 export function flushToolCalls(accs: Map<number, AccumulatedToolCall>): ToolCall[] {
-  return [...accs.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .filter(([, acc]) => Boolean(acc.name))
-    .map(([, acc]) => ({
+  const entries = [...accs.entries()].sort((a, b) => a[0] - b[0]);
+  const invalid = entries.find(([, acc]) => !acc.name);
+  if (invalid) {
+    throw new ForgeError('PROVIDER_ERROR', `模型流式工具调用 ${invalid[0]} 缺少函数名`, { retryable: false });
+  }
+  return entries.map(([, acc]) => ({
       id: acc.id ?? toolCallId(),
       type: 'function' as const,
       function: { name: acc.name as string, arguments: acc.args.trim() || '{}' },

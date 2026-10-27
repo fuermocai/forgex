@@ -131,7 +131,7 @@ async function doConnect(params: ConnectParams): Promise<number> {
     return 1;
   }
 
-  // 2. 持久化 API Key 到用户级环境变量
+  // 2. 持久化 API Key 到凭据文件（三平台一致，重开终端也能读到）
   const preset = PROVIDERS[provider];
   const envName = preset?.apiKeyEnv ?? provider.toUpperCase().replace(/[^A-Z0-9_]/g, '_') + '_API_KEY';
   const envPersisted = persistApiKey(envName, apiKey);
@@ -152,8 +152,8 @@ async function doConnect(params: ConnectParams): Promise<number> {
   stdout.write(`\n配置已写入：${configPath}\n`);
   stdout.write(`API Key 持久化：`);
   if (envPersisted.ok) {
-    stdout.write(`✅ ${envName}（用户级环境变量）\n`);
-    stdout.write(`               当前会话已生效 ✅\n`);
+    stdout.write(`✅ ${envName} → ${envPersisted.hint}\n`);
+    stdout.write(`               当前会话已生效，重开会话自动读取 ✅\n`);
   } else {
     stdout.write(`⚠️  需手动设置：\n`);
     stdout.write(`               ${envPersisted.hint}\n`);

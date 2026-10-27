@@ -199,6 +199,8 @@ export type AgentEvent =
 
 export type TurnEndReason =
   | 'completed'
+  | 'output_truncated'
+  | 'content_filtered'
   | 'max_iterations'
   | 'aborted'
   | 'error'

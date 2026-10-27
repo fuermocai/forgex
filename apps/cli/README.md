@@ -70,6 +70,7 @@ forgex config                   # 查看最终生效配置（Key 脱敏）
 ```
 
 `forgex run` 支持 `--session <id>` 继续历史会话，`--yes` 跳过审批（仅建议在隔离环境使用）。
+退出码 `0` 表示模型回合正常结束；当前 CLI 不会自动运行测试或验收代码变更，因此不能把它当作代码任务通过的信号。JSON 输出中的 `taskVerification` 会明确标记为 `not_performed`。
 
 ## 配置
 

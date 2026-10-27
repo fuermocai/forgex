@@ -2,7 +2,7 @@
  * 配置加载与校验。
  *
  * 优先级（后者覆盖前者）：
- *   内置默认值 < 配置文件 < 环境变量 < 命令行参数（--mode / --config 等）
+ *   内置默认值 < 配置文件 < 凭据文件（仅补空缺的 Key） < 环境变量 < 命令行参数（--mode / --config 等）
  *
  * 安全约束：
  *  - API Key 只允许来自配置文件或环境变量（`apiKeyEnv` 间接引用），
@@ -107,7 +107,14 @@ export interface LoadedConfig {
   sources: string[];
   /** 是否已显式配置模型（baseUrl/model 至少来自文件或环境变量） */
   modelConfigured: boolean;
+  /** API Key 的实际来源（用于 doctor 排查"重启后 Key 没了"） */
+  apiKeySource: ApiKeySource;
+  /** 凭据文件路径（无论是否读到都返回，便于提示该放哪） */
+  credentialsPath: string;
 }
+
+/** API Key 来源：环境变量 / 凭据文件 / 配置文件明文 / 未配置 */
+export type ApiKeySource = 'env' | 'credentials' | 'file' | null;
 
 export interface LoadConfigOptions {
   cwd?: string;
@@ -119,6 +126,10 @@ export interface LoadConfigOptions {
   logger?: Logger;
   /** 跳过 ~/.forgex/config.json（测试隔离用，生产默认 false） */
   skipGlobal?: boolean;
+  /** 凭据文件路径（默认 ~/.forgex/credentials.json） */
+  credentialsPath?: string;
+  /** 跳过凭据文件（测试隔离用，生产默认 false） */
+  skipCredentials?: boolean;
 }
 
 /** 候选配置文件路径（按优先级） */
@@ -132,7 +143,8 @@ export function candidateConfigPaths(cwd: string, env: NodeJS.ProcessEnv, option
 
 export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   const cwd = options.cwd ?? process.cwd();
-  const env = options.env ?? process.env;
+  const rawEnv = options.env ?? process.env;
+  let env = rawEnv;
   const logger = options.logger ?? createLogger({ level: 'warn' });
   const sources: string[] = ['默认值'];
 
@@ -151,6 +163,24 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   if (configPath) {
     fileData = readConfigFile(configPath, logger);
     sources.push(`配置文件 ${configPath}`);
+  }
+
+  // 凭据文件兜底：Linux/macOS 上 `forgex connect` / `/key` 把 Key 写进 0600 的
+  // ~/.forgex/credentials.json（没有跨终端的用户级环境变量可用）。
+  // 优先级低于真实环境变量——显式 export 的永远胜出。
+  const credentialsPath = options.credentialsPath ?? join(homedir(), '.forgex', 'credentials.json');
+  const injectedFromCredentials = new Set<string>();
+  if (!options.skipCredentials) {
+    const credentials = readCredentialsFile(credentialsPath, logger);
+    const picked: Record<string, string> = {};
+    for (const [name, value] of Object.entries(credentials)) {
+      if (!rawEnv[name]) picked[name] = value;
+    }
+    if (Object.keys(picked).length > 0) {
+      env = { ...env, ...picked };
+      for (const name of Object.keys(picked)) injectedFromCredentials.add(name);
+      sources.push(`凭据文件 ${credentialsPath}`);
+    }
   }
 
   const envData = readEnvConfig(env);
@@ -181,11 +211,29 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   }
   const value = parsed.data;
 
-  // API Key：优先 apiKeyEnv 指向的环境变量，其次配置文件明文
+  // API Key：优先 apiKeyEnv 指向的环境变量，其次配置文件 / FORGEX_API_KEY 提供的明文。
+  // 这里必须保留第二档：配置声明了 DEEPSEEK_API_KEY、Key 却是从 FORGEX_API_KEY
+  // 或凭据文件的其它条目来的情况下，只看 envKeyName 会把已经拿到的 Key 丢掉，
+  // 用户看到的就是「填过一次，重启又没了」。
   const envKeyName = value.model.apiKeyEnv;
-  const apiKey = envKeyName ? env[envKeyName] : value.model.apiKey;
+  const envKeyValue = envKeyName ? env[envKeyName] : undefined;
+  const apiKey = envKeyValue ?? value.model.apiKey;
   if (envKeyName && !apiKey) {
     logger.warn('配置引用的 API Key 环境变量为空', { env: envKeyName });
+  }
+
+  // 记录 Key 到底来自哪：doctor 用它回答"重启后 Key 还在不在、从哪读的"
+  let apiKeySource: ApiKeySource = null;
+  if (apiKey) {
+    if (envKeyValue) {
+      apiKeySource = envKeyName && injectedFromCredentials.has(envKeyName) ? 'credentials' : 'env';
+    } else if (rawEnv.FORGEX_API_KEY) {
+      apiKeySource = 'env';
+    } else if (injectedFromCredentials.has('FORGEX_API_KEY')) {
+      apiKeySource = 'credentials';
+    } else {
+      apiKeySource = 'file';
+    }
   }
 
   const modelConfigured = determineModelConfigured(fileData, env, value);
@@ -200,6 +248,7 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
     maxRetries: value.model.maxRetries,
     stream: value.model.stream,
     ...(apiKey ? { apiKey } : {}),
+    ...(envKeyName ? { apiKeyEnv: envKeyName } : {}),
     ...(value.model.headers ? { headers: value.model.headers } : {}),
     ...(value.model.name ? { name: value.model.name } : {}),
   };
@@ -238,6 +287,8 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
     configPath,
     sources,
     modelConfigured,
+    apiKeySource,
+    credentialsPath,
   };
 }
 
@@ -263,6 +314,28 @@ function readConfigFile(path: string, logger: Logger): Record<string, unknown> {
   } catch (err) {
     logger.error('配置文件不是合法 JSON', { path, error: err instanceof Error ? err.message : String(err) });
     throw new ForgeError('CONFIG_INVALID', `配置文件不是合法 JSON: ${path}`);
+  }
+}
+
+/** 读取凭据文件（`{ "keys": { "DEEPSEEK_API_KEY": "..." } }`，也兼容扁平结构） */
+function readCredentialsFile(path: string, logger: Logger): Record<string, string> {
+  if (!existsSync(path)) return {};
+  try {
+    const raw = readFileSync(path, 'utf8').replace(/^\uFEFF/, '');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const container = (typeof parsed.keys === 'object' && parsed.keys !== null ? parsed.keys : parsed) as Record<
+      string,
+      unknown
+    >;
+    const out: Record<string, string> = {};
+    for (const [name, value] of Object.entries(container)) {
+      if (typeof value === 'string' && value.trim().length > 0) out[name] = value.trim();
+    }
+    return out;
+  } catch (err) {
+    // 凭据文件坏掉不该阻断启动：当作不存在，用户仍可用环境变量
+    logger.warn('凭据文件解析失败，已忽略', { path, error: err instanceof Error ? err.message : String(err) });
+    return {};
   }
 }
 

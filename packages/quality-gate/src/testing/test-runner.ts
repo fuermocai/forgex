@@ -58,6 +58,10 @@ export class TestRunner {
       })),
     };
 
+    if (result.total === 0) {
+      throw new ForgeError('QUALITY_GATE_FAILED', '没有发现任何测试，不能将测试阶段标记为通过', { details: { result } });
+    }
+
     if (result.failed > 0) {
       const sampleFailures = result.failures
         .slice(0, 3)

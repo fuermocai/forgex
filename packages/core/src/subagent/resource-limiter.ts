@@ -59,6 +59,20 @@ export class ResourceLimiter {
     this.checkToolCallBudget();
   }
 
+  /** 预留整批工具调用；预算不足时不执行其中任何一个调用 */
+  reserveToolCalls(count: number): boolean {
+    const requested = Math.max(0, Math.trunc(count));
+    if (this.exceeded) return false;
+    if (this.toolCallsUsed + requested > this.budget.maxToolCalls) {
+      this.markExceeded(
+        `工具调用次数将超过预算 ${this.budget.maxToolCalls}（已用 ${this.toolCallsUsed}，本批 ${requested}）`,
+      );
+      return false;
+    }
+    this.toolCallsUsed += requested;
+    return true;
+  }
+
   /** 记录一次 AgentLoop 迭代 */
   recordIteration(): void {
     this.iterationsUsed += 1;
