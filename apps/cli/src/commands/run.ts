@@ -344,8 +344,10 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
           return 1;
         }
       }
-      if (!autoApprove && !rl) {
-        const reason = '非交互模式下必须显式传入 --yes 才能执行计划';
+      const hasApprovalGates = loaded.config.security.requireApprovalForWrite
+        || loaded.config.security.requireApprovalForExecute;
+      if (!autoApprove && !rl && !hasApprovalGates) {
+        const reason = '非交互模式下必须显式传入 --yes 才能执行计划；当前策略未设置写入或执行审批门槛';
         emitText(stderr, json, `\n⛔ ${reason}\n`);
         emitResult({ plan, cancellationReason: reason }, json, 'aborted', 1);
         return 1;
