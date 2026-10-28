@@ -101,7 +101,7 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
     audit,
     store,
     cwd: workspaceCwd,
-    maxIterations: config.agent.maxIterations,
+    ...(config.agent.maxIterations !== undefined ? { maxIterations: config.agent.maxIterations } : {}),
     maxConcurrency: config.agent.maxConcurrency,
     logger,
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),

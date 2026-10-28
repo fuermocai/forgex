@@ -180,7 +180,7 @@ export function readExistingConfig(path: string): ExistingConfig {
       requireApprovalForExecute: true,
     },
     session: { dbPath: join('.forgex', 'sessions.db') },
-    agent: { maxIterations: 12, maxConcurrency: 3 },
+    agent: { maxConcurrency: 3 },
   };
   if (!existsSync(path)) return defaults;
   try {

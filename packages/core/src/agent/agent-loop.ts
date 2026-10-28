@@ -39,7 +39,7 @@ export interface AgentLoopOptions {
   context: ContextManager;
   events: EventBus;
   sessionId: string;
-  /** 单轮最大迭代次数（模型请求次数），默认 12 */
+  /** 单轮最大迭代次数（模型请求次数）；未设置时持续运行，直到模型结束或用户取消 */
   maxIterations?: number;
   /** 连续相同工具调用的次数阈值，达到即判定循环，默认 3 */
   repeatThreshold?: number;
@@ -78,7 +78,6 @@ export interface LoopResult {
   error?: ToolErrorInfo;
 }
 
-const DEFAULT_MAX_ITERATIONS = 12;
 const DEFAULT_REPEAT_THRESHOLD = 3;
 
 export class AgentLoop {
@@ -88,7 +87,7 @@ export class AgentLoop {
   private readonly context: ContextManager;
   private readonly events: EventBus;
   private readonly sessionId: string;
-  private readonly maxIterations: number;
+  private readonly maxIterations: number | undefined;
   private readonly repeatThreshold: number;
   private readonly logger: Logger | undefined;
   private readonly persistMessage: ((message: ChatMessage) => void) | undefined;
@@ -103,7 +102,9 @@ export class AgentLoop {
     this.context = options.context;
     this.events = options.events;
     this.sessionId = options.sessionId;
-    this.maxIterations = Math.max(1, options.maxIterations ?? DEFAULT_MAX_ITERATIONS);
+    this.maxIterations = options.maxIterations === undefined
+      ? undefined
+      : Math.max(1, Math.floor(options.maxIterations));
     this.repeatThreshold = Math.max(2, options.repeatThreshold ?? DEFAULT_REPEAT_THRESHOLD);
     this.logger = options.logger;
     this.persistMessage = options.persistMessage;
@@ -140,7 +141,16 @@ export class AgentLoop {
     let totalToolCalls = 0;
     const allToolResults: Array<{ toolName: string; result: ToolResult }> = [];
 
-    for (let iteration = 1; iteration <= this.maxIterations; iteration += 1) {
+    for (let iteration = 1; ; iteration += 1) {
+      if (this.maxIterations !== undefined && iteration > this.maxIterations) {
+        this.events.emit({
+          type: 'notice',
+          level: 'warn',
+          message: `已达到显式设置的最大迭代次数 ${this.maxIterations}，本轮未完成`,
+          ts: Date.now(),
+        });
+        return { text: lastText, reason: 'max_iterations', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
+      }
       iterations = iteration;
 
       if (signal.aborted) {
@@ -340,14 +350,6 @@ export class AgentLoop {
       }
     }
 
-    // 达到最大迭代次数：本轮已把最后一次工具结果补齐，协议保持合法
-    this.events.emit({
-      type: 'notice',
-      level: 'warn',
-      message: `已达到最大迭代次数 ${this.maxIterations}，本轮结束`,
-      ts: Date.now(),
-    });
-    return { text: lastText, reason: 'max_iterations', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
   }
 
   /** 追加消息并持久化 */

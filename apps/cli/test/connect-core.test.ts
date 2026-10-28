@@ -309,7 +309,7 @@ describe('saveConnectionConfig', () => {
       });
       expect(written.security.mode).toBe('standard');
       expect(written.session.dbPath).toBe(join('.forgex', 'sessions.db'));
-      expect(written.agent.maxIterations).toBe(12);
+      expect(written.agent.maxIterations).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

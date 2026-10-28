@@ -67,7 +67,8 @@ const SessionSchema = z.object({
 });
 
 const AgentSchema = z.object({
-  maxIterations: z.number().int().min(1).max(50).default(12),
+  /** 未配置时不因模型请求次数截断；可通过 FORGEX_MAX_ITERATIONS 显式设置 */
+  maxIterations: z.number().int().min(1).optional(),
   maxConcurrency: z.number().int().min(1).max(8).default(3),
 });
 
@@ -108,7 +109,7 @@ export interface ResolvedConfig {
     remoteHosts: RemoteHostConfig[];
   };
   session: { dbPath: string };
-  agent: { maxIterations: number; maxConcurrency: number };
+  agent: { maxIterations?: number; maxConcurrency: number };
   worktree: { root: string };
 }
 
@@ -295,7 +296,10 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
         remoteHosts,
       },
       session: { dbPath },
-      agent: { maxIterations: value.agent.maxIterations, maxConcurrency: value.agent.maxConcurrency },
+      agent: {
+        ...(value.agent.maxIterations !== undefined ? { maxIterations: value.agent.maxIterations } : {}),
+        maxConcurrency: value.agent.maxConcurrency,
+      },
       worktree: { root: resolveWorktreeRoot(value.worktree.root, cwd, env) },
     },
     configPath,

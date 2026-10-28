@@ -100,9 +100,11 @@ cargo build --release --manifest-path crates/executor/Cargo.toml
     "requireApprovalForWrite": true,
     "requireApprovalForExecute": true
   },
-  "agent": { "maxIterations": 12, "maxConcurrency": 3 }
+  "agent": { "maxConcurrency": 3 }
 }
 ```
+
+Agent 默认持续运行，直到模型结束或用户取消。需要限制模型请求次数时，可在 `agent` 中显式设置 `"maxIterations": 20`，或设置环境变量 `FORGEX_MAX_ITERATIONS=20`；达到该上限会以未完成状态返回。
 
 启动：
 
