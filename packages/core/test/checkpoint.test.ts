@@ -27,11 +27,13 @@ function samplePlan(overrides: Partial<TaskPlan> = {}): TaskPlan {
     created_at: nowIso(),
     updated_at: nowIso(),
     status: 'pending',
-    steps: [
-      createStep({ task_id: planId, description: '读 server.js 日志', risk_level: 'read' }),
-      createStep({ task_id: planId, description: '定位 Controller', risk_level: 'read', dependencies: [`${planId}2`] }),
-      createStep({ task_id: planId, description: '分析调用链', risk_level: 'read', dependencies: [`${planId}3`] }),
-    ],
+    steps: (() => {
+      // 依赖必须引用真实 step_id（快照加载时做悬空依赖校验）
+      const s1 = createStep({ task_id: planId, description: '读 server.js 日志', risk_level: 'read' });
+      const s2 = createStep({ task_id: planId, description: '定位 Controller', risk_level: 'read', dependencies: [s1.step_id] });
+      const s3 = createStep({ task_id: planId, description: '分析调用链', risk_level: 'read', dependencies: [s2.step_id] });
+      return [s1, s2, s3];
+    })(),
     metadata: { model: 'qwen-max', max_attempts_default: 2 },
     ...overrides,
   };
@@ -39,6 +41,7 @@ function samplePlan(overrides: Partial<TaskPlan> = {}): TaskPlan {
 
 function checkpointOf(plan: TaskPlan, abort = false): CheckpointRecord {
   return {
+    schema_version: 2,
     plan_id: plan.plan_id,
     snapshot_at: nowIso(),
     plan,

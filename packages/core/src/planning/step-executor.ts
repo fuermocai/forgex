@@ -19,7 +19,7 @@
  * 不实现 AgentLoop 调用的 mock 适配——Phase 1 先写骨架，集成时再补。
  */
 import type { LoopResult } from '../agent/agent-loop.js';
-import type { JsonValue } from '@forgex/shared';
+import type { JsonValue, RunMetrics } from '@forgex/shared';
 import type { PlanManager } from './plan-manager.js';
 import { verifyStep } from './task-verifier.js';
 import type { ExecutionResult, TaskPlan, TaskStep } from './types.js';
@@ -27,7 +27,7 @@ import type { ExecutionResult, TaskPlan, TaskStep } from './types.js';
 export interface StepExecutorOptions {
   planManager: PlanManager;
   /** Agent 实例——用于执行单个步骤（可选，不传时 StepExecutor 只做状态推进测试用） */
-  agent?: { run: (prompt: string, options?: { signal?: AbortSignal }) => Promise<LoopResult> };
+  agent?: { run: (prompt: string, options?: { signal?: AbortSignal; allowedTools?: ReadonlySet<string> }) => Promise<LoopResult & { metrics?: Pick<RunMetrics, 'totalMs' | 'modelCalls' | 'totalTokens'> }> };
   /** 最大重试次数上限（默认 2，每个 step 的 max_attempts 覆盖） */
   globalMaxAttempts?: number;
   /** 全局 AbortSignal（用户取消整个计划） */
@@ -55,7 +55,7 @@ export interface StepExecResult {
 }
 
 export class StepExecutor {
-  private readonly agent?: { run: (prompt: string, options?: { signal?: AbortSignal }) => Promise<LoopResult> };
+  private readonly agent?: { run: (prompt: string, options?: { signal?: AbortSignal; allowedTools?: ReadonlySet<string> }) => Promise<LoopResult & { metrics?: Pick<RunMetrics, 'totalMs' | 'modelCalls' | 'totalTokens'> }> };
   private readonly planManager: PlanManager;
   private readonly globalMaxAttempts: number;
   private readonly signal?: AbortSignal;
@@ -116,6 +116,10 @@ export class StepExecutor {
     let attemptsUsed = 0;
     let lastResult: ExecutionResult | undefined;
     let lastVerifyResult: ReturnType<typeof verifyStep> | undefined;
+    let totalToolCalls = 0;
+    let totalModelCalls = 0;
+    let totalTokens = 0;
+    let totalDurationMs = 0;
 
     while (attemptsUsed < maxAttempts) {
       // 检查全局取消
@@ -147,7 +151,18 @@ export class StepExecutor {
       attemptsUsed++;
 
       const retryHint = lastVerifyResult && !lastVerifyResult.passed ? lastVerifyResult.reason : undefined;
-      const result = await this.runAttempt(plan, step, retryHint);
+      const attemptResult = await this.runAttempt(plan, step, retryHint);
+      totalToolCalls += attemptResult.toolCallCount;
+      totalModelCalls += attemptResult.modelCallCount ?? 0;
+      totalTokens += attemptResult.tokenUsage ?? 0;
+      totalDurationMs += attemptResult.durationMs;
+      const result: ExecutionResult = {
+        ...attemptResult,
+        toolCallCount: totalToolCalls,
+        durationMs: totalDurationMs,
+        ...(totalModelCalls > 0 ? { modelCallCount: totalModelCalls } : {}),
+        ...(totalTokens > 0 ? { tokenUsage: totalTokens } : {}),
+      };
       lastResult = result;
       if (result.cancelled) {
         this.planManager.updateStepStatus(planId, stepId, 'cancelled', result.failureReason ?? '执行被取消');
@@ -214,6 +229,7 @@ export class StepExecutor {
    * 如果没注入 agent（测试场景），返回空的失败结果。
    */
   private async runAttempt(plan: TaskPlan, step: TaskStep, retryHint?: string): Promise<ExecutionResult> {
+    const startedAt = Date.now();
     if (!this.agent) {
       return {
         success: false,
@@ -227,24 +243,39 @@ export class StepExecutor {
     }
 
     const extra = this.contextBuilder ? this.contextBuilder(plan, step) : '';
+    const verificationPrompt = step.verification.type === 'file_content'
+      ? `验收要求: ${step.verification.target} 的完整内容必须与下面给出的预期内容一致。完成后使用本步骤允许的文件工具确认最终内容；如果允许 read_file，必须从第 1 行完整读取到文件末尾。\n预期完整内容:\n${step.verification.expectedContent ?? ''}\n`
+      : '';
     const prompt =
       `${step.description}\n\n` +
       `目标: 执行上述步骤，完成后输出最终结果。\n` +
       `风险等级: ${step.risk_level}\n` +
+      verificationPrompt +
       (step.required_tools.length > 0 ? `需要工具: ${step.required_tools.join(', ')}\n` : '') +
       (retryHint ? `\n上一轮未通过验证：${retryHint}\n请先检查当前状态，再完成缺失部分。\n` : '') +
       (extra ? `\n附加上下文:\n${extra}\n` : '');
 
     try {
-      const result = await this.agent.run(prompt, { signal: this.signal });
+      // [P3] 严格工具白名单：每步只能调用 step.required_tools 里声明的工具
+      //      如果 required_tools 为空，allowedTools 传空 Set → 禁止所有工具（fail closed）
+      const allowedTools = step.required_tools.length > 0
+        ? new Set(step.required_tools)
+        : new Set<string>();
+
+      const result = await this.agent.run(prompt, { signal: this.signal, allowedTools });
       const toolCalls = result.toolCalls;
+      const durationMs = result.metrics?.totalMs ?? Date.now() - startedAt;
+      const modelCallCount = result.metrics?.modelCalls;
+      const tokenUsage = result.metrics?.totalTokens;
 
       const cancelled = result.reason === 'aborted';
       if (cancelled) {
         return {
           success: false,
           toolCallCount: toolCalls,
-          durationMs: 0,
+          durationMs,
+          ...(modelCallCount !== undefined ? { modelCallCount } : {}),
+          ...(tokenUsage !== undefined ? { tokenUsage } : {}),
           verificationPassed: false,
           failureReason: '执行被取消',
           cancelled: true,
@@ -261,7 +292,9 @@ export class StepExecutor {
       return {
         success,
         toolCallCount: toolCalls,
-        durationMs: 0, // Phase 1 暂时拿不到 LoopResult 的总耗时，后续集成 metrics
+        durationMs,
+        ...(modelCallCount !== undefined ? { modelCallCount } : {}),
+        ...(tokenUsage !== undefined ? { tokenUsage } : {}),
         verificationPassed: success && hasVerifiedToolEvidence,
         summary: result.text,
         ...(success ? {} : { failureReason: `AgentLoop 终止原因: ${result.reason}` }),
@@ -280,11 +313,13 @@ export class StepExecutor {
       return {
         success: false,
         toolCallCount: 0,
-        durationMs: 0,
+        durationMs: Date.now() - startedAt,
         verificationPassed: false,
         failureReason: err instanceof Error ? err.message : String(err),
-        // 抛异常代表 AgentLoop 自身的意外状态（bug、provider 构造失败等），
-        // 且无法确认是否已产生副作用，一律不重放
+        // throw new Error 无法区分"provider 构造失败"（配置错误，重试无意义）和
+        // "模型瞬态超时"（重试可能恢复）。保守策略：catch 块一律不重放，
+        // 让调用方（benchmark）用 return LoopResult { error: { retryable: true } }
+        // 明确标记可重试的瞬态失败，而不是依赖 throw。
         retryable: false,
       };
     }
@@ -297,7 +332,23 @@ function projectVerificationData(toolName: string, raw: JsonValue): JsonValue {
   const data = raw as Record<string, JsonValue>;
   switch (toolName) {
     case 'read_file':
-      return typeof data.path === 'string' ? { path: data.path } : {};
+      return typeof data.path === 'string'
+        ? {
+            path: data.path,
+            ...(typeof data.contentHash === 'string' ? { contentHash: data.contentHash } : {}),
+            contentComplete: data.truncated !== true && data.startLine === 1 && typeof data.totalLines === 'number' && data.endLine === data.totalLines,
+          }
+        : {};
+    case 'edit_file':
+    case 'write_file':
+      return typeof data.path === 'string'
+        ? {
+            path: data.path,
+            changed: data.changed === true,
+            ...(typeof data.contentHash === 'string' ? { contentHash: data.contentHash } : {}),
+            contentComplete: true,
+          }
+        : {};
     case 'list_directory':
       return {
         entries: Array.isArray(data.entries)

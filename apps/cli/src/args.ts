@@ -21,6 +21,11 @@ const VALUE_FLAGS = new Set([
   'env-name',
   'db',
   'prompt',
+  // `--resume <runId>`：从中断的任务恢复（v0.5.7，安全诊断通过才继续）
+  'resume',
+  // task reconcile 用（v0.5.7）：目标步骤与备注
+  'step',
+  'note',
 ]);
 
 /** 布尔开关（无需取值） */
@@ -36,6 +41,18 @@ const BOOLEAN_FLAGS = new Set([
   'connect',
   // `--plan`：一次性任务也走计划模式（只读分析 + 只输出计划），供 CI / 管道做 dry-run
   'plan',
+  // `--worktree`：把编码任务放进独立 Git worktree + 分支执行，产物可审阅（v0.5.6）
+  'worktree',
+  // task reconcile 用（v0.5.7 中断恢复）
+  'confirm-done',
+  'confirm-retry',
+  'block',
+  // `--resume <runId>`：从中断的任务恢复（v0.5.7，安全诊断通过才继续）
+
+  // task 子命令用
+  'force',
+  'patch',
+  'stat',
 ]);
 
 /** 全部已知参数，用于拼写错误校验（避免 `--doctor` 被静默当成 chat） */

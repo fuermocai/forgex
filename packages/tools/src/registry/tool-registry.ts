@@ -94,6 +94,25 @@ export class ToolRegistry {
     return [...this.tools.keys()];
   }
 
+  /**
+   * 返回一个只包含指定工具名的新 ToolRegistry。
+   * 不存在的工具名会被忽略（不抛错）。
+   *
+   * 用途：v0.5.0 TaskPlanner 每步执行前，用 step.required_tools 构造
+   * 受限 sub-registry 传给 AgentLoop，让模型只能看到白名单内的工具定义。
+   * 不在白名单里的工具连 schema 都看不到 → 不可能发起 tool_call。
+   *
+   * 这是"真正的强制约束"，不是靠 system prompt 请求模型自觉。
+   */
+  subset(allowed: ReadonlySet<string> | ReadonlyArray<string>): ToolRegistry {
+    const allowedSet = allowed instanceof Set ? allowed : new Set(allowed);
+    const sub = new ToolRegistry();
+    for (const tool of this.tools.values()) {
+      if (allowedSet.has(tool.name)) sub.register(tool);
+    }
+    return sub;
+  }
+
   /** 生成模型可见的工具声明（参数已转换为 JSON Schema） */
   specs(): ToolSpec[] {
     return this.list().map((tool) => ({

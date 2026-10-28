@@ -1,54 +1,28 @@
 /**
- * SandboxLifecycle：沙箱生命周期管理（v0.4.0 Phase 2）。
+ * SandboxLifecycle：沙箱生命周期管理（v0.4.0 Phase 2，v0.5.5 移除旁路执行入口）。
  *
  * 职责：
- *   - 创建 → 执行 → 清理的完整生命周期；
- *   - 异常时确保资源回收（try/finally）；
- *   - 超时后进程被清理。
+ *   - 创建 / 销毁沙箱，保证异常时资源回收；
+ *   - **不负责执行**：执行必须经过 SandboxManager 的路由（trusted → 资源限制，
+ *     untrusted → OS 沙箱），因此这里不再提供 `runInSandbox()`——旧实现会直接
+ *     调用 ResourceLimiter，等于给 untrusted 开了一条绕过 OS 沙箱的旁路。
  *
  * 安全约束：
  *   - 无论执行成功或失败，沙箱必须被销毁；
  *   - 不允许资源泄漏。
  */
-import type { Sandbox, SandboxExecResult, SandboxExecSpec, SandboxSpec } from '../types.js';
-import type { ResourceLimiter } from '../manager/resource-limiter.js';
+import type { Sandbox, SandboxSpec } from '../types.js';
 import type { WorkspaceManager } from '../workspace/workspace-manager.js';
 
 export interface SandboxLifecycleOptions {
   workspaceManager: WorkspaceManager;
-  resourceLimiter: ResourceLimiter;
 }
 
 export class SandboxLifecycle {
   private readonly workspaceManager: WorkspaceManager;
-  private readonly resourceLimiter: ResourceLimiter;
 
   constructor(options: SandboxLifecycleOptions) {
     this.workspaceManager = options.workspaceManager;
-    this.resourceLimiter = options.resourceLimiter;
-  }
-
-  /**
-   * 在沙箱中执行一个操作，确保沙箱最终被清理。
-   */
-  async runInSandbox(
-    spec: SandboxSpec,
-    execSpec: SandboxExecSpec,
-    signal?: AbortSignal,
-  ): Promise<{ sandbox: Sandbox; result: SandboxExecResult }> {
-    const sandbox = await this.workspaceManager.createWorkspace(spec);
-    try {
-      const result = await this.resourceLimiter.exec(
-        {
-          ...execSpec,
-          cwd: execSpec.cwd ?? sandbox.workDir,
-        },
-        signal,
-      );
-      return { sandbox, result };
-    } finally {
-      await this.workspaceManager.destroyWorkspace(sandbox);
-    }
   }
 
   /**

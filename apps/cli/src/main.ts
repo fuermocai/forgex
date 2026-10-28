@@ -9,6 +9,8 @@
  *   tools     列出内置工具
  *   sessions  查看历史会话
  *   config    查看最终生效配置
+ *   sandbox   查看沙箱能力（工作区隔离 vs OS 级隔离）
+ *   task      查看/审阅/清理任务产物（worktree 差异、清理）
  *
  * 退出码：0 成功；1 失败/未完成；2 参数错误。
  */
@@ -22,6 +24,8 @@ import { toolsCommand } from './commands/tools.js';
 import { sessionsCommand } from './commands/sessions.js';
 import { configCommand } from './commands/config.js';
 import { connectCommand } from './commands/connect.js';
+import { sandboxCommand } from './commands/sandbox.js';
+import { taskCommand } from './commands/task.js';
 import { VERSION } from './version.js';
 
 async function main(argv: string[]): Promise<number> {
@@ -78,6 +82,10 @@ async function main(argv: string[]): Promise<number> {
       return configCommand(args, { cwd });
     case 'connect':
       return await connectCommand(args, { cwd });
+    case 'sandbox':
+      return await sandboxCommand(args, { cwd });
+    case 'task':
+      return await taskCommand(args, { cwd });
     default:
       stderr.write(`未知命令: ${args.command}\n\n`);
       printHelp();
@@ -96,8 +104,9 @@ function printHelp(): void {
       '  connect            交互式连接模型（写入 ~/.forgex/config.json + 持久化 API Key）',
       '  chat [--plain] [--session <id>] [--config <path>] [--mode <模式>] [--plan]',
       '      进入交互式会话（TTY 下使用 Ink TUI，管道/--plain 使用纯文本）',
-      '  run "<任务>" [--json] [--yes] [--session <id>] [--config <path>] [--mode <模式>] [--plan]',
+      '  run "<任务>" [--json] [--yes] [--session <id>] [--config <path>] [--mode <模式>] [--plan] [--worktree]',
       '      执行单次任务；支持从标准输入读取任务内容',
+      '      --worktree  在独立 Git worktree + 分支中执行，产物可审阅（默认仍为原地执行）',
       '  doctor [--full] [--config <path>] [--mode <模式>]',
       '      检查 Node、工作区、数据库、rg/git、系统诊断能力',
       '  tools',
@@ -106,6 +115,12 @@ function printHelp(): void {
       '      查看历史会话',
       '  config [--config <path>] [--mode <模式>]',
       '      打印最终生效配置（API Key 脱敏）',
+      '  sandbox [--json] [--config <path>]',
+      '      打印沙箱能力：区分工作区隔离 / 资源限制 / OS 级隔离',
+      '  task list|show|diff|clean|diagnose|reconcile|resume [<runId>] [--json]',
+      '      审阅任务产物：diff 看 worktree 差异、clean 显式清理、',
+      '      diagnose 中断诊断、reconcile 人工核对（--confirm-done/--confirm-retry/--block）、',
+      '      resume 安全恢复（只有未开始步骤会自动调度，副作用未知的步骤必须先 reconcile）',
       '',
       '通用选项：',
       '  --mode <模式>      权限模式：readonly | standard | trusted | yolo，优先级高于配置文件与环境变量',

@@ -20,6 +20,7 @@ function okResult(text: string): LoopResult {
     reason: 'completed',
     text,
     toolCalls: 1,
+    toolResults: [{ toolName: 'run_command', result: { ok: true, summary: 'ok', truncated: false, durationMs: 1, bytes: 10, auditId: 'audit_test' } }],
     iterations: 1,
     metrics: {
       totalTokens: 0,
@@ -253,5 +254,133 @@ describe('StepExecutor 状态机合规性', () => {
     const result = await executor.executeStep(plan.plan_id, 'step_not_exists');
     expect(result.final_status).toBe('failed');
     expect(result.attemptsUsed).toBe(0);
+  });
+});
+
+/* ==================================================================== */
+/* P3 allowedTools 强制约束回归测试                                       */
+/*                                                                     */
+/* 验证 StepExecutor.runAttempt 把 step.required_tools 正确转成        */
+/* allowedTools Set 传给 agent.run()。核心防御：                        */
+/*   - required_tools 非空 → allowedTools = Set(required_tools)        */
+/*   - required_tools 为空 → allowedTools = Set() → 禁止所有工具      */
+/* ==================================================================== */
+
+describe('StepExecutor P3 — allowedTools 强制约束', () => {
+  it('step.required_tools=["read_file"] → agent.run 收到 allowedTools Set 仅含 read_file', async () => {
+    const mgr = new PlanManager();
+    const step = createStep({
+      task_id: 't',
+      description: '只读步骤',
+      required_tools: ['read_file'],
+      risk_level: 'read',
+    });
+    const plan = mgr.createPlan({ user_request: '测试', steps: [step] });
+    mgr.updateStepStatus(plan.plan_id, step.step_id, 'ready');
+
+    let receivedAllowedTools: ReadonlySet<string> | undefined;
+    const executor = new StepExecutor({
+      planManager: mgr,
+      agent: {
+        run: async (_prompt, opts) => {
+          receivedAllowedTools = opts?.allowedTools;
+          return okResult('done');
+        },
+      },
+    });
+
+    await executor.executeStep(plan.plan_id, step.step_id);
+
+    expect(receivedAllowedTools).toBeDefined();
+    expect(receivedAllowedTools instanceof Set).toBe(true);
+    expect([...receivedAllowedTools!]).toEqual(['read_file']);
+  });
+
+  it('step.required_tools=[] → agent.run 收到空 Set（禁止所有工具，fail closed）', async () => {
+    const mgr = new PlanManager();
+    const step = createStep({
+      task_id: 't',
+      description: '无工具权限的步骤',
+      required_tools: [], // 空 = 禁止所有
+    });
+    const plan = mgr.createPlan({ user_request: '测试', steps: [step] });
+    mgr.updateStepStatus(plan.plan_id, step.step_id, 'ready');
+
+    let receivedAllowedTools: ReadonlySet<string> | undefined;
+    const executor = new StepExecutor({
+      planManager: mgr,
+      agent: {
+        run: async (_prompt, opts) => {
+          receivedAllowedTools = opts?.allowedTools;
+          // 模拟：空 Set 意味着 ToolDispatcher 会拒绝所有 tool_calls
+          return okResult('done');
+        },
+      },
+    });
+
+    await executor.executeStep(plan.plan_id, step.step_id);
+
+    expect(receivedAllowedTools).toBeDefined();
+    expect([...receivedAllowedTools!]).toEqual([]); // 空 Set
+  });
+
+  it('step.required_tools 含多个工具 → Set 包含全部声明的工具', async () => {
+    const mgr = new PlanManager();
+    const step = createStep({
+      task_id: 't',
+      description: '多工具步骤',
+      required_tools: ['read_file', 'edit_file', 'run_command'],
+    });
+    const plan = mgr.createPlan({ user_request: '测试', steps: [step] });
+    mgr.updateStepStatus(plan.plan_id, step.step_id, 'ready');
+
+    let receivedAllowedTools: ReadonlySet<string> | undefined;
+    const executor = new StepExecutor({
+      planManager: mgr,
+      agent: {
+        run: async (_prompt, opts) => {
+          receivedAllowedTools = opts?.allowedTools;
+          return okResult('done');
+        },
+      },
+    });
+
+    await executor.executeStep(plan.plan_id, step.step_id);
+
+    expect(receivedAllowedTools).toBeDefined();
+    const tools = [...receivedAllowedTools!].sort();
+    expect(tools).toEqual(['edit_file', 'read_file', 'run_command']);
+  });
+
+  it('allowedTools 被设置后即使 agent 尝试调用未授权工具也无法绕过', async () => {
+    // 这个测试是防御性的——证明 StepExecutor 层面不做过滤本身就是正确行为，
+    // 因为真正的过滤在 ToolDispatcher 层做。StepExecutor 只是传递白名单。
+    const mgr = new PlanManager();
+    const step = createStep({
+      task_id: 't',
+      description: '声明只允许 read_file 的步骤',
+      required_tools: ['read_file'],
+    });
+    const plan = mgr.createPlan({ user_request: '测试', steps: [step] });
+    mgr.updateStepStatus(plan.plan_id, step.step_id, 'ready');
+
+    let receivedAllowedTools: ReadonlySet<string> | undefined;
+    const executor = new StepExecutor({
+      planManager: mgr,
+      agent: {
+        run: async (_prompt, opts) => {
+          receivedAllowedTools = opts?.allowedTools;
+          // agent 无论如何都拿到了正确的白名单
+          return okResult('done');
+        },
+      },
+    });
+
+    await executor.executeStep(plan.plan_id, step.step_id);
+
+    expect(receivedAllowedTools).toBeDefined();
+    expect([...receivedAllowedTools!]).toEqual(['read_file']);
+    // ToolDispatcher 层会确保即使 agent 尝试调用 edit_file 也会被拒绝——
+    // 这个拦截逻辑在 ToolDispatcher 的 execute() 函数里独立测试。
   });
 });

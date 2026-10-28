@@ -5,15 +5,36 @@
     "rootDir": "src",
     "tsBuildInfoFile": "dist/.tsbuildinfo",
     "jsx": "react-jsx",
-    "lib": ["ES2023", "DOM"]
+    "lib": [
+      "ES2023",
+      "DOM"
+    ]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
   "references": [
-    { "path": "../../packages/shared" },
-    { "path": "../../packages/security" },
-    { "path": "../../packages/models" },
-    { "path": "../../packages/devops" },
-    { "path": "../../packages/tools" },
-    { "path": "../../packages/core" }
+    {
+      "path": "../../packages/shared"
+    },
+    {
+      "path": "../../packages/security"
+    },
+    {
+      "path": "../../packages/models"
+    },
+    {
+      "path": "../../packages/devops"
+    },
+    {
+      "path": "../../packages/tools"
+    },
+    {
+      "path": "../../packages/core"
+    },
+    {
+      "path": "../../packages/sandbox"
+    }
   ]
 }

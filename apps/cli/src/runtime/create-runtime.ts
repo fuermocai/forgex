@@ -8,7 +8,7 @@
  */
 import type { Logger } from '@forgex/shared';
 import { createLogger } from '@forgex/shared';
-import { createProvider } from '@forgex/models';
+import { createProvider, type ModelProvider } from '@forgex/models';
 import {
   ApprovalManager,
   AuditLogger,
@@ -32,6 +32,8 @@ export interface CreateRuntimeOptions {
 
 export interface ForgeRuntime {
   agent: Agent;
+  /** 直连模型的 provider（TaskPlanGenerator 用它纯 JSON 生成计划，不经过 AgentLoop/ToolDispatcher） */
+  provider: ModelProvider;
   store: SessionStore;
   approvals: ApprovalManager;
   audit: AuditLogger;
@@ -107,6 +109,7 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
 
   return {
     agent,
+    provider,
     store,
     approvals,
     audit,

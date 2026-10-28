@@ -7,9 +7,12 @@
  *  - 路径解析强制经过 WorkspaceGuard（ctx.workspace），防止穿越。
  */
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import type { JsonValue, ToolContext, ToolDefinition, ToolOutcome } from '@forgex/shared';
 import { errorToOutcome, toolOk } from '../tool-result.js';
-import { readFileLines, toWorkspaceRelative } from './fs-utils.js';
+import { readFileLines, readWholeText, toWorkspaceRelative } from './fs-utils.js';
+
+const MAX_VERIFIED_FILE_BYTES = 2 * 1024 * 1024;
 
 const inputSchema = z.object({
   path: z.string().min(1).describe('相对于工作区根目录的文件路径'),
@@ -40,6 +43,13 @@ export function createReadFileTool(): ToolDefinition<Input> {
           maxBytes: 128 * 1024,
         });
         const rel = toWorkspaceRelative(ctx.workspaceRoot, absPath);
+        let contentHash: string | undefined;
+        if (!result.truncated && result.startLine === 1 && result.totalLines === result.endLine) {
+          try {
+            const completeContent = await readWholeText(absPath, MAX_VERIFIED_FILE_BYTES);
+            contentHash = createHash('sha256').update(completeContent.replace(/\r\n?/g, '\n'), 'utf8').digest('hex');
+          } catch { /* 文件过大或不能完整回读时，不提供 file_content 验收证据 */ }
+        }
         const total = result.totalLines === null ? '未知' : String(result.totalLines);
         const summary =
           result.text.length === 0
@@ -55,6 +65,7 @@ export function createReadFileTool(): ToolDefinition<Input> {
             totalLines: result.totalLines,
             content: result.text,
             sizeBytes: result.sizeBytes,
+            ...(contentHash ? { contentHash } : {}),
           },
           result.truncated,
         );

@@ -40,6 +40,8 @@ export interface RunPlanOptions {
   maxSteps?: number;
   /** 手动指定要执行的 step_ids（调试用——跳过 DependencyScheduler） */
   stepIds?: string[];
+  /** 每个步骤结束后立即回调，适合持久化恢复所需的状态与指标 */
+  onStepResult?: (result: StepExecResult) => void;
 }
 
 export interface RunPlanResult {
@@ -111,6 +113,7 @@ export class TaskPlanner {
         for (const stepId of toRun) {
           if (results.length >= maxSteps) break;
           const r = await this.executor.executeStep(planId, stepId);
+          options.onStepResult?.(r);
           results.push(r);
         }
         break; // 手动模式只跑一次
@@ -123,6 +126,7 @@ export class TaskPlanner {
 
       const stepId = order[0]!;
       const r = await this.executor.executeStep(planId, stepId);
+      options.onStepResult?.(r);
       results.push(r);
 
       // 取消则提前退出

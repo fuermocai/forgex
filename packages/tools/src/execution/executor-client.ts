@@ -22,6 +22,12 @@ export interface ExecutorSpec {
   env: Record<string, string>;
   timeoutMs: number;
   maxOutputBytes: number;
+  /** 调用方身份 token：Rust 侧设置了 FORGEX_EXECUTOR_TOKEN 时必须匹配 */
+  callerToken?: string;
+  /** cwd 允许的根目录白名单（为空时不做额外限制） */
+  allowedCwdRoots?: readonly string[];
+  /** 审计标签，出现在 executor 的 stderr 审计事件里 */
+  auditTag?: string;
 }
 
 export interface ExecutorResult {

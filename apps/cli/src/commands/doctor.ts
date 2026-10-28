@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { dirname } from 'node:path';
 import { stdout } from 'node:process';
 import { getMemory, listProcesses } from '@forgex/devops';
+import { describeCapabilityReport, detectCapabilities, type SandboxCapabilityReport } from '@forgex/sandbox';
 import { createBuiltinTools, ToolRegistry } from '@forgex/tools';
 import { flagBool, flagString, type ParsedArgs } from '../args.js';
 import { loadConfig, type ApiKeySource } from '../config/load-config.js';
@@ -151,6 +152,40 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
     detail: git.ok ? git.detail : '未安装（git_status / git_diff 不可用）',
   });
 
+  // 8. 沙箱能力：必须把「工作区隔离」和「OS 级隔离」分开说，
+  //    否则用户很容易把临时目录 / worktree 当成能跑不可信代码的沙箱。
+  const sandboxRoot = loaded ? loaded.config.security.workspaceRoots[0]! : options.cwd;
+  let sandboxReport: SandboxCapabilityReport | null = null;
+  try {
+    sandboxReport = await detectCapabilities(sandboxRoot);
+    const workspaceOk = sandboxReport.tempDir.available || sandboxReport.git.available;
+    checks.push({
+      name: '工作区隔离',
+      status: workspaceOk ? 'ok' : 'fail',
+      detail: `临时目录 ${sandboxReport.tempDir.available ? '可用' : '不可用'}，Git worktree ${sandboxReport.git.available ? '可用' : '不可用'}（只隔离文件视图，不是 OS 沙箱）`,
+    });
+    checks.push({
+      name: 'OS 沙箱',
+      status: sandboxReport.osSandbox.available ? 'ok' : 'warn',
+      detail: sandboxReport.osSandbox.available
+        ? `${sandboxReport.osSandbox.details?.mechanism ?? 'bubblewrap'}（探针已验证）· ${sandboxReport.osSandbox.details?.bwrap_path ?? ''}`
+        : sandboxReport.osSandbox.reason,
+    });
+    checks.push({
+      name: '不可信执行',
+      status: sandboxReport.untrustedExecution.allowed ? 'ok' : 'warn',
+      detail: sandboxReport.untrustedExecution.allowed
+        ? '允许（trustLevel=untrusted 会经 OS 沙箱执行）'
+        : '拒绝（fail closed，不降级到临时目录 / worktree / 普通进程）',
+    });
+  } catch (err) {
+    checks.push({
+      name: '沙箱能力',
+      status: 'fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // 8. 工具注册
   try {
     const registry = new ToolRegistry(createBuiltinTools());
@@ -197,6 +232,14 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
   const failed = checks.filter((check) => check.status === 'fail').length;
   const warned = checks.filter((check) => check.status === 'warn').length;
   stdout.write(`\n结果：${checks.length} 项检查，${failed} 项失败，${warned} 项警告\n`);
+
+  if (full && sandboxReport) {
+    stdout.write('\n沙箱能力明细\n');
+    for (const line of describeCapabilityReport(sandboxReport)) {
+      stdout.write(`  ${line}\n`);
+    }
+  }
+
   return failed > 0 ? 1 : 0;
 }
 

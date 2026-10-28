@@ -1,0 +1,140 @@
+name: package
+
+# 可安装发行版加固：
+#  - 跨平台构建 / 类型检查 / 单元测试（Node 22 × Linux / Windows / macOS）
+#  - npm tarball 打包 + 临时目录安装冒烟（scripts/install-smoke.mjs）
+#  - Rust 执行器构建/测试独立成 job —— CLI 的 CI 不依赖 Rust 产物；
+#    CLI 能力报告在执行器缺失时如实报"不可用"（见 packages/sandbox/src/manager/capability-detector.ts）
+#  - OS 沙箱集成测试单独 job：真实 Linux + bwrap + Rust 执行器三者齐备才跑，
+#    否则跳过并在理由里说明 —— 不把 mock 结果当成已验证的隔离能力
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build+typecheck+test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: 构建
+        run: pnpm build
+
+      - name: 单元测试
+        run: pnpm test
+
+  pack-install-smoke:
+    name: npm tarball install smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 构建 npm 发布目录（含三处版本一致性校验）
+        run: pnpm build:npm
+
+      - name: tarball 清单检查 + 隔离安装 + CLI 冒烟
+        # 不发布：脚本只 pack 到本地临时目录，并在隔离 HOME 下安装运行
+        run: pnpm smoke:npm
+
+      - name: 上传 tarball（仅供排查，不发布）
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.os }}
+          path: dist-npm/*.tgz
+          retention-days: 7
+
+  rust-executor:
+    name: rust executor build+test
+    # 独立阶段：CLI 的构建/测试/冒烟都不依赖本 job
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/executor
+
+      - name: cargo build
+        run: cargo build --release --manifest-path crates/executor/Cargo.toml
+
+      - name: cargo test
+        run: cargo test --manifest-path crates/executor/Cargo.toml
+
+  os-sandbox-integration:
+    name: os sandbox integration (linux + bwrap + rust executor)
+    # 真实隔离验证的唯一来源。三个条件缺一个都只能跳过，不允许用 mock 顶替：
+    #   Linux + bubblewrap（apt 安装）+ crates/executor 编译产物（FORGEX_EXECUTOR）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/executor
+
+      - name: 安装 bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 构建 Rust 执行器
+        run: cargo build --release --manifest-path crates/executor/Cargo.toml
+
+      - name: 构建 TS（执行器解析依赖仓库相对路径约定）
+        run: pnpm build
+
+      - name: 真实 bubblewrap 集成测试
+        env:
+          FORGEX_EXECUTOR: ${{ github.workspace }}/target/release/forgex-executor
+        run: pnpm vitest run packages/sandbox/test/os-sandbox-linux.integration.test.ts

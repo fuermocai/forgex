@@ -17,10 +17,28 @@ function okLoopResult(text) {
     reason: 'completed',
     text,
     toolCalls: 1,
+    toolResults: [{ toolName: 'run_command', result: { ok: true, summary: 'ok', truncated: false, durationMs: 1, bytes: 10, auditId: 'audit_bench' } }],
     iterations: 1,
     metrics: {
       totalTokens: 0, promptTokens: 0, completionTokens: 0,
       toolCalls: 1, toolMs: 0, modelMs: 0, durationMs: 0, iterations: 1,
+    },
+  };
+}
+
+/** 可重试的瞬态失败（模型超时 / 瞬态不可用）：有 error.retryable=true，且无工具调用 */
+function retryableLoopResult(message) {
+  return {
+    sessionId: 'bench-session',
+    reason: 'error',
+    text: '',
+    toolCalls: 0,
+    toolResults: [],
+    iterations: 1,
+    error: { code: 'PROVIDER_TIMEOUT', message, retryable: true },
+    metrics: {
+      totalTokens: 0, promptTokens: 0, completionTokens: 0,
+      toolCalls: 0, toolMs: 0, modelMs: 0, durationMs: 0, iterations: 1,
     },
   };
 }
@@ -52,7 +70,7 @@ export const suite = {
           agent: {
             run: async () => {
               calls += 1;
-              throw new Error('模拟模型持续失败');
+              return retryableLoopResult('模拟模型持续失败');
             },
           },
         });
@@ -75,7 +93,7 @@ export const suite = {
           agent: {
             run: async () => {
               calls += 1;
-              if (calls === 1) throw new Error('首次失败');
+              if (calls === 1) return retryableLoopResult('首次失败');
               return okLoopResult('完成');
             },
           },

@@ -17,8 +17,11 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 import { ForgeError } from '@forgex/shared';
-import type { CheckpointRecord, TaskPlan } from './types.js';
+import { TASK_STATUSES, type CheckpointRecord, type TaskPlan } from './types.js';
 import { nowIso } from './types.js';
+
+/** 当前快照 schema 版本（与 types.ts CheckpointRecord.schema_version 保持一致） */
+export const CHECKPOINT_SCHEMA_VERSION = 2 as const;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS plan_checkpoints (
@@ -97,6 +100,7 @@ export class CheckpointManager {
     }
 
     const record: CheckpointRecord = {
+      schema_version: CHECKPOINT_SCHEMA_VERSION,
       plan_id: plan.plan_id,
       snapshot_at: nowIso(),
       plan,
@@ -112,6 +116,10 @@ export class CheckpointManager {
   /**
    * 加载某个 plan_id 的最新 checkpoint。
    * 恢复流程第一步——拿到完整快照后，根据 status 和重试预算决定从哪里继续。
+   *
+   * 加载即校验（schema 版本、结构、依赖完整性）：
+   * 损坏或旧版本的快照抛 PLANNING_CHECKPOINT_ERROR，**拒绝恢复**并给出诊断，
+   * 宁可人工介入也不基于不可信快照继续产生副作用。
    */
   load(planId: string): CheckpointRecord | null {
     try {
@@ -119,14 +127,17 @@ export class CheckpointManager {
         .prepare('SELECT payload FROM plan_checkpoints WHERE plan_id = ?')
         .get(planId) as { payload: string } | undefined;
       if (!row) return null;
+      let record: CheckpointRecord;
       try {
-        return JSON.parse(row.payload) as CheckpointRecord;
+        record = JSON.parse(row.payload) as CheckpointRecord;
       } catch (parseErr) {
         throw new ForgeError('PLANNING_CHECKPOINT_ERROR', `checkpoint payload 解析失败: ${planId}`, {
           cause: parseErr,
           details: { planId },
         });
       }
+      validateCheckpointRecord(record);
+      return record;
     } catch (err) {
       if (err instanceof ForgeError) throw err;
       throw new ForgeError('PLANNING_CHECKPOINT_ERROR', `读取 checkpoint 失败: ${planId}`, {
@@ -183,5 +194,111 @@ export class CheckpointManager {
     } catch {
       return false;
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 快照校验：加载即验证，不兼容/损坏一律拒绝恢复                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 校验一条 checkpoint 记录的结构完整性。纯函数，供 load() 与恢复流程复用。
+ *
+ * 校验项（全部通过才返回，否则抛 PLANNING_CHECKPOINT_ERROR）：
+ *   1. schema_version === 2 —— 旧版快照（无此字段）直接拒绝；
+ *   2. plan_id 存在且与请求一致；
+ *   3. plan.steps 非空数组、step_id 唯一；
+ *   4. 每步 dependencies 引用的 step_id 都存在（无悬空依赖）；
+ *   5. 步骤 status 都是合法枚举值；
+ *   6. running_step_id / completed_step_ids / failed_step_ids 与 plan.steps 一致。
+ */
+export function validateCheckpointRecord(record: unknown): asserts record is CheckpointRecord {
+  const problems: string[] = [];
+  const rec = record as Partial<CheckpointRecord> | null;
+
+  if (!rec || typeof rec !== 'object') {
+    throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '快照不是合法对象', {
+      details: { problems: ['payload 不是对象'] },
+    });
+  }
+  if (rec.schema_version === undefined || rec.schema_version === null) {
+    throw new ForgeError(
+      'PLANNING_CHECKPOINT_ERROR',
+      '旧版本快照（缺少 schema_version，schema v1）无法校验兼容性，拒绝恢复；该快照由旧版 ForgeX 写入，请人工核对任务状态',
+      { details: { planId: rec.plan_id ?? null, schemaVersion: null } },
+    );
+  }
+  if (rec.schema_version !== CHECKPOINT_SCHEMA_VERSION) {
+    throw new ForgeError(
+      'PLANNING_CHECKPOINT_ERROR',
+      `快照 schema 版本不兼容：快照 v${String(rec.schema_version)}，当前 v${CHECKPOINT_SCHEMA_VERSION}，拒绝恢复`,
+      { details: { planId: rec.plan_id ?? null, schemaVersion: rec.schema_version } },
+    );
+  }
+  if (typeof rec.plan_id !== 'string' || rec.plan_id.length === 0) {
+    problems.push('plan_id 缺失或非字符串');
+  }
+  const plan = rec.plan as TaskPlan | undefined;
+  if (!plan || typeof plan !== 'object' || plan.plan_id !== rec.plan_id) {
+    problems.push('plan 缺失，或 plan.plan_id 与记录不一致');
+  } else {
+    if (!Array.isArray(plan.steps) || plan.steps.length === 0) {
+      problems.push('plan.steps 为空或不是数组');
+    } else {
+      const ids = new Set<string>();
+      for (const step of plan.steps) {
+        if (!step || typeof step.step_id !== 'string' || step.step_id.length === 0) {
+          problems.push('存在缺少 step_id 的步骤');
+          continue;
+        }
+        if (ids.has(step.step_id)) problems.push(`step_id 重复: ${step.step_id}`);
+        ids.add(step.step_id);
+        if (!TASK_STATUSES.includes(step.status)) {
+          problems.push(`步骤 ${step.step_id} 状态非法: ${String(step.status)}`);
+        }
+        if (!Array.isArray(step.dependencies)) {
+          problems.push(`步骤 ${step.step_id} 的 dependencies 不是数组`);
+        } else {
+          for (const dep of step.dependencies) {
+            // 依赖允许指向本批 ids；悬空依赖在这里就能查出来
+            if (!plan.steps.some((s) => s.step_id === dep)) {
+              problems.push(`步骤 ${step.step_id} 依赖了不存在的步骤: ${dep}`);
+            }
+          }
+        }
+      }
+      const validIds = new Set(plan.steps.filter((s) => typeof s?.step_id === 'string').map((s) => s.step_id));
+      for (const [field, list] of [
+        ['completed_step_ids', rec.completed_step_ids],
+        ['failed_step_ids', rec.failed_step_ids],
+      ] as const) {
+        if (!Array.isArray(list)) {
+          problems.push(`${field} 不是数组`);
+        } else {
+          for (const id of list) {
+            if (!validIds.has(id)) problems.push(`${field} 引用了不存在的步骤: ${String(id)}`);
+          }
+        }
+      }
+      if (rec.running_step_id !== undefined && !validIds.has(rec.running_step_id)) {
+        problems.push(`running_step_id 引用了不存在的步骤: ${String(rec.running_step_id)}`);
+      }
+      const runningInPlan = plan.steps.filter((s) => s.status === 'running').map((s) => s.step_id);
+      if (runningInPlan.length > 1) {
+        problems.push(`多个步骤处于 running 态: ${runningInPlan.join(', ')}`);
+      }
+      if (rec.running_step_id && runningInPlan.length > 0 && !runningInPlan.includes(rec.running_step_id)) {
+        problems.push(`running_step_id(${rec.running_step_id}) 与 plan 中的 running 步骤(${runningInPlan.join(', ')})不一致`);
+      }
+    }
+  }
+  if (problems.length > 0) {
+    throw new ForgeError(
+      'PLANNING_CHECKPOINT_ERROR',
+      `快照校验失败，拒绝恢复（${problems.length} 个问题）：${problems.join('；')}`,
+      {
+        details: { planId: rec.plan_id ?? null, problems },
+      },
+    );
   }
 }

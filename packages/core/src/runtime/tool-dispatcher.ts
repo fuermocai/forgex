@@ -61,6 +61,16 @@ export interface ToolDispatcherOptions {
 interface ExecuteOptions {
   sessionId: string;
   signal: AbortSignal;
+  /**
+   * 严格的工具白名单（v0.5.0 P3 加固）。
+   * 如果设置了这个集合，只有在集合里的工具名才会被执行。
+   * 不在白名单里的工具 → 直接 TOOL_NOT_ALLOWED 拒绝，不审计（因为根本没执行）。
+   * 空集合 = 禁止所有工具。不传 = 不做过滤（默认行为）。
+   *
+   * 用途：TaskPlanner 每步执行前传入 step.required_tools，
+   *      让模型只能调用本步骤明确允许的工具。
+   */
+  allowedTools?: ReadonlySet<string>;
 }
 
 const MAX_ARGUMENTS_BYTES = 64 * 1024;
@@ -115,6 +125,12 @@ export class ToolDispatcher {
     const started = Date.now();
     const { sessionId, signal } = options;
     const toolName = call.function.name;
+
+    // [P3] 强制工具白名单过滤 —— 事前拦截，不审计（因为根本没执行）
+    if (options.allowedTools && !options.allowedTools.has(toolName)) {
+      return makeToolNotAllowedResult(toolName, options.allowedTools);
+    }
+
     const tool = this.registry.get(toolName);
 
     // 1. 解析参数（失败也必须有 tool_result）
@@ -479,6 +495,17 @@ export class ToolDispatcher {
 /* ------------------------------------------------------------------ */
 /* 辅助函数                                                            */
 /* ------------------------------------------------------------------ */
+
+function makeToolNotAllowedResult(toolName: string, allowed: ReadonlySet<string>): ToolResult {
+  return {
+    ok: false,
+    summary: `TOOL_NOT_ALLOWED: 本步骤只允许 [${[...allowed].join(', ')}]，但模型请求了 ${toolName}`,
+    truncated: false,
+    durationMs: 0,
+    bytes: 0,
+    auditId: `blocked_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+  };
+}
 
 function parseArguments(raw: string | undefined): unknown {
   const text = raw ?? '';

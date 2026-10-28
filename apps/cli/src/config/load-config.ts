@@ -71,11 +71,23 @@ const AgentSchema = z.object({
   maxConcurrency: z.number().int().min(1).max(8).default(3),
 });
 
+/**
+ * 可审阅 Git worktree（v0.5.6）。
+ *
+ * 这里只配置"产物放哪"，不配置"什么时候用"——是否隔离由 `forgex run --worktree` 显式决定，
+ * 默认行为保持原地执行。
+ */
+const WorktreeSchema = z.object({
+  /** ForgeX 管理的 worktree 根目录（默认 ~/.forgex/worktrees） */
+  root: z.string().min(1).optional(),
+});
+
 const ConfigSchema = z.object({
   model: ModelSchema.default({}),
   security: SecuritySchema.default({}),
   session: SessionSchema.default({}),
   agent: AgentSchema.default({}),
+  worktree: WorktreeSchema.default({}),
 });
 
 export type FileConfig = z.input<typeof ConfigSchema>;
@@ -97,6 +109,7 @@ export interface ResolvedConfig {
   };
   session: { dbPath: string };
   agent: { maxIterations: number; maxConcurrency: number };
+  worktree: { root: string };
 }
 
 export interface LoadedConfig {
@@ -283,6 +296,7 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
       },
       session: { dbPath },
       agent: { maxIterations: value.agent.maxIterations, maxConcurrency: value.agent.maxConcurrency },
+      worktree: { root: resolveWorktreeRoot(value.worktree.root, cwd, env) },
     },
     configPath,
     sources,
@@ -483,6 +497,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function resolveFrom(cwd: string, target: string): string {
   const expanded = expandHome(target);
   return isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
+}
+
+/**
+ * worktree 根目录优先级：`FORGEX_WORKTREE_ROOT` 环境变量 > 配置 `worktree.root` > `~/.forgex/worktrees`。
+ * 无论哪种来源都解析成绝对路径——清理时要靠它做"路径确实在 ForgeX 管理范围内"的判定。
+ */
+function resolveWorktreeRoot(configured: string | undefined, cwd: string, env: NodeJS.ProcessEnv): string {
+  const fromEnv = env.FORGEX_WORKTREE_ROOT?.trim();
+  if (fromEnv) return resolveFrom(cwd, fromEnv);
+  if (configured?.trim()) return resolveFrom(cwd, configured);
+  return join(homedir(), '.forgex', 'worktrees');
 }
 
 function expandHome(target: string): string {

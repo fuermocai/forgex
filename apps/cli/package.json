@@ -1,6 +1,6 @@
 {
   "name": "forgex-agent",
-  "version": "0.5.4",
+  "version": "0.5.7",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -17,6 +17,7 @@
     "@forgex/core": "workspace:*",
     "@forgex/devops": "workspace:*",
     "@forgex/models": "workspace:*",
+    "@forgex/sandbox": "workspace:*",
     "@forgex/security": "workspace:*",
     "@forgex/shared": "workspace:*",
     "@forgex/tools": "workspace:*",

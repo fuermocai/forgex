@@ -110,6 +110,8 @@ export interface StepVerification {
   type:
     | 'tool_return_ok'              // 执行的最后一个工具返回 ok=true
     | 'file_exists'                 // 指定文件存在
+    | 'file_changed'                // 本步骤成功修改了指定文件
+    | 'file_content'                // 指定文件完整内容与预期完全一致
     | 'command_exit_zero'           // run_command 返回 code=0
     | 'git_no_conflict'             // git merge/rebase 无冲突
     | 'custom'                      // 自定义（交给 TaskVerifier 处理）
@@ -117,6 +119,8 @@ export interface StepVerification {
 
   /** 验证目标（tool_return_ok 不需要；custom 时可为任意描述） */
   target?: string;
+  /** file_content 的预期完整文件内容 */
+  expectedContent?: string;
   /** 验证失败时的补救提示（给模型看的） */
   hintOnFail?: string;
 }
@@ -129,6 +133,8 @@ export interface ExecutionResult {
   toolCallCount: number;
   /** 总 token 消耗（估算） */
   tokenUsage?: number;
+  /** 模型请求次数 */
+  modelCallCount?: number;
   /** 实际耗时毫秒 */
   durationMs: number;
   /** 验证结果（StepExecutor 调用 StepVerification 后写入） */
@@ -255,6 +261,11 @@ export interface TaskPlan {
  * 第一个未终态步骤继续。
  */
 export interface CheckpointRecord {
+  /**
+   * 快照 schema 版本。v2 起强制写入并在加载时校验；
+   * 旧版（v1，无此字段）快照拒绝恢复——结构无法证明兼容，宁可让人工介入。
+   */
+  schema_version: 2;
   /** 对应 TaskPlan.plan_id */
   plan_id: string;
   /** 快照生成时间 */

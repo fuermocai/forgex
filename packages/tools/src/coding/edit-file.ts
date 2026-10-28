@@ -11,6 +11,7 @@
  *  - 原子写入，避免半截文件。
  */
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import type { JsonValue, ToolContext, ToolDefinition, ToolOutcome } from '@forgex/shared';
 import { createUnifiedDiff } from '@forgex/shared';
 import { errorToOutcome, toolError, toolOk } from '../tool-result.js';
@@ -67,9 +68,11 @@ export function createEditFileTool(): ToolDefinition<Input> {
           : original.replace(adapted.oldText, adapted.newText);
 
         if (updated === original) {
+          const persisted = await readWholeText(absPath, MAX_EDIT_BYTES);
           return toolOk('新旧内容相同，未修改文件', {
             path: toWorkspaceRelative(ctx.workspaceRoot, absPath),
             changed: false,
+            contentHash: hashContent(persisted),
             replacements: 0,
           });
         }
@@ -77,6 +80,7 @@ export function createEditFileTool(): ToolDefinition<Input> {
         const rel = toWorkspaceRelative(ctx.workspaceRoot, absPath);
         const diff = createUnifiedDiff(original, updated, rel);
         const bytesWritten = await atomicWriteText(absPath, updated);
+        const persisted = await readWholeText(absPath, MAX_EDIT_BYTES);
 
         return toolOk(
           `已修改 ${rel}：+${diff.stat.added} -${diff.stat.removed} 行` +
@@ -84,6 +88,7 @@ export function createEditFileTool(): ToolDefinition<Input> {
           {
             path: rel,
             changed: true,
+            contentHash: hashContent(persisted),
             replacements: input.replaceAll ? occurrences : 1,
             added: diff.stat.added,
             removed: diff.stat.removed,
@@ -96,6 +101,10 @@ export function createEditFileTool(): ToolDefinition<Input> {
       }
     },
   };
+}
+
+function hashContent(content: string): string {
+  return createHash('sha256').update(content.replace(/\r\n?/g, '\n'), 'utf8').digest('hex');
 }
 
 /** 统计不重叠出现次数 */

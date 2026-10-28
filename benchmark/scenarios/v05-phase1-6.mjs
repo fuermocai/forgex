@@ -157,8 +157,8 @@ export const suite = {
         });
         const executor = {
           planSteps() {
-            // 10 步但预算只允许 2 步
-            return Array.from({ length: 10 }, (_, i) => ({ id: `s_${i}`, name: `Step ${i}`, description: '' }));
+            // 10 步但预算只允许 2 步；每步 description 必须非空（AutonomousRunner 会校验）
+            return Array.from({ length: 10 }, (_, i) => ({ id: `s_${i}`, name: `Step ${i}`, description: `执行第 ${i} 步任务` }));
           },
           async executeStep() {
             return { success: true, tokenUsage: 0, llmCalls: 0, summary: '' };

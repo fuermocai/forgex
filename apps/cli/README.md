@@ -45,8 +45,10 @@ forgex
 | 命令 | 作用 |
 | --- | --- |
 | `/models` | 切换模型；也支持 `/models deepseek-v4-pro` |
+| `/mode [模式]` | 查看/切换权限模式（readonly / standard / trusted / yolo），`Shift+Tab` 循环 |
 | `/plan` | 进入/退出计划模式：只读分析，不改文件、不执行命令 |
 | `/connect` | 配置 Provider、API Key、模型，并测试连通性 |
+| `/key <API Key>` | 保存 API Key（持久化到凭据文件，重开会话仍可用） |
 | `/context` | 查看当前上下文 token 估算 |
 | `/session` | 查看当前会话 ID |
 | `/help` | 查看帮助 |
@@ -63,6 +65,9 @@ forgex connect                 # 配置模型连接
 forgex                          # 启动 TUI（非 TTY 时自动纯文本模式）
 forgex run "检查端口 8080"       # 单次任务
 forgex run --json "..."         # JSON 输出
+forgex run "修复空指针" --worktree  # 在独立 Git worktree + 分支中执行，产物可审阅
+forgex task list|show|diff|clean  # 审阅/清理 worktree 任务产物
+forgex sandbox                  # 查看沙箱能力（区分工作区隔离 / 资源限制 / OS 级隔离）
 forgex doctor                   # 环境自检
 forgex tools                    # 列出内置工具
 forgex sessions                 # 查看历史会话
@@ -70,7 +75,11 @@ forgex config                   # 查看最终生效配置（Key 脱敏）
 ```
 
 `forgex run` 支持 `--session <id>` 继续历史会话，`--yes` 跳过审批（仅建议在隔离环境使用）。
-退出码 `0` 表示模型回合正常结束；当前 CLI 不会自动运行测试或验收代码变更，因此不能把它当作代码任务通过的信号。JSON 输出中的 `taskVerification` 会明确标记为 `not_performed`。
+任务闭环会生成计划、逐步执行并运行项目质量门禁（如 `npm test`），最终状态以 JSON 输出与
+`forgex task list` 为准：`completed` / `unverified` / `failed` 等；`unverified` 表示项目没有可运行的
+门禁命令，不能当作验证通过。
+`--worktree` 只隔离工作区与改动（独立 worktree + 分支，产物用 `forgex task diff` 审阅），
+仓库有未提交改动时会直接拒绝，不会 stash/reset。
 
 ## 配置
 
@@ -95,6 +104,9 @@ forgex config                   # 查看最终生效配置（Key 脱敏）
 - 写文件、执行命令默认需要人工审批。
 - 审计日志写入 `~/.forgex/audit.jsonl`，敏感字段会脱敏。
 - 会话保存在 `~/.forgex/sessions.db`。
+- 临时目录 / Git worktree 只隔离文件视图；Rust 执行器只提供超时、输出限额与进程树清理——
+  都**不是** OS 沙箱。OS 级隔离（bubblewrap）目前仅 Linux 可用，需通过启动探针验证；
+  其它平台或验证失败时，不可信代码执行（`trustLevel: untrusted`）一律拒绝，不降级、不静默裸跑。
 - 命令白名单不是内核级沙箱；不要在不可信目录中随意授予执行权限。
 
 ## 链接

@@ -35,6 +35,9 @@ importers:
       '@forgex/models':
         specifier: workspace:*
         version: link:../../packages/models
+      '@forgex/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@forgex/security':
         specifier: workspace:*
         version: link:../../packages/security

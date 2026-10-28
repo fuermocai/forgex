@@ -1,0 +1,48 @@
+name: task-eval
+
+# `forgex run` 任务闭环评测：判断 CLI 是否真实完成任务并正确报告状态。
+# 红线（任一命中即失败）：误报 completed、执行被禁止的工具、审批被拒后仍产生副作用。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  task-eval:
+    name: task-eval (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 两个平台都跑：Windows 会跳过 pty / SIGINT 两个用例，其余必须一致通过
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 构建（评测直接运行 CLI 产物）
+        run: pnpm build
+
+      - name: 红线检测器自检
+        run: pnpm eval:task:selftest
+
+      - name: 任务闭环评测（CI 门禁）
+        run: pnpm eval:task:ci
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: task-eval-${{ matrix.os }}
+          path: eval/results/
+          if-no-files-found: warn
+          retention-days: 14

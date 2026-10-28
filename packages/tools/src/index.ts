@@ -8,6 +8,7 @@ import { createReadFileTool } from './coding/read-file.js';
 import { createListDirectoryTool } from './coding/list-directory.js';
 import { createGrepSearchTool } from './coding/grep-search.js';
 import { createEditFileTool } from './coding/edit-file.js';
+import { createWriteFileTool } from './coding/write-file.js';
 import { createGitStatusTool } from './coding/git-status.js';
 import { createGitDiffTool } from './coding/git-diff.js';
 import { createInspectProcessTool } from './system/inspect-process.js';
@@ -29,6 +30,7 @@ export { createReadFileTool } from './coding/read-file.js';
 export { createListDirectoryTool } from './coding/list-directory.js';
 export { createGrepSearchTool } from './coding/grep-search.js';
 export { createEditFileTool } from './coding/edit-file.js';
+export { createWriteFileTool } from './coding/write-file.js';
 export { createGitStatusTool } from './coding/git-status.js';
 export { createGitDiffTool } from './coding/git-diff.js';
 export { createInspectProcessTool } from './system/inspect-process.js';
@@ -68,6 +70,7 @@ export function createBuiltinTools(options?: { remoteHosts?: readonly RemoteHost
     createListDirectoryTool(),
     createGrepSearchTool(),
     createEditFileTool(),
+    createWriteFileTool(),
     createGitStatusTool(),
     createGitDiffTool(),
     createInspectProcessTool(),

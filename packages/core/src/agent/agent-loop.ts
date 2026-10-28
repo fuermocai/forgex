@@ -57,6 +57,12 @@ export interface AgentLoopOptions {
 export interface LoopRunOptions {
   signal: AbortSignal;
   metrics: MetricsCollector;
+  /**
+   * 本轮运行的严格工具白名单（v0.5.0 P3 加固）。
+   * ToolDispatcher.execute 收到不在白名单里的工具名会事前拒绝。
+   * 不传 = 不做过滤（默认行为）。
+   */
+  allowedTools?: ReadonlySet<string>;
 }
 
 export interface LoopResult {
@@ -323,7 +329,7 @@ export class AgentLoop {
       }
 
       // 7. 统一调度执行（并发、语义校验、策略、审批、审计都在 Dispatcher 内）
-      const results = await this.dispatcher.executeMany(toolCalls, { sessionId: this.sessionId, signal });
+      const results = await this.dispatcher.executeMany(toolCalls, { sessionId: this.sessionId, signal, allowedTools: options.allowedTools });
       for (const result of results) metrics.recordTool(result);
       allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: results[index]! })));
       this.appendToolMessages(toolCalls, results);

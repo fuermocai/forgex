@@ -65,8 +65,13 @@ export interface AgentOptions {
 
 export interface AgentRunOptions {
   signal?: AbortSignal;
+  /**
+   * 本轮运行的严格工具白名单（v0.5.0 P3 加固）。
+   * 让模型只能在这个工具集合里选择，不在集合里的工具连调用尝试都会被事前拒绝。
+   * 不传 = 不做过滤（默认行为，全 registry 可见）。
+   */
+  allowedTools?: ReadonlySet<string>;
 }
-
 export interface AgentRunResult extends LoopResult {
   sessionId: string;
   metrics: RunMetrics;
@@ -82,6 +87,8 @@ export class Agent {
   private readonly baseSystemPrompt: string;
   private readonly context: ContextManager;
   private readonly loop: AgentLoop;
+  /** 公共只读：CLI 层质量门禁等需要直接走 ToolDispatcher 执行工具（绕开 AgentLoop，保持确定性） */
+  readonly dispatcher: ToolDispatcher;
   private readonly store: SessionStore | undefined;
   private readonly logger: Logger | undefined;
   /** 当前轮次的指标收集器（审批回调需要） */
@@ -136,7 +143,7 @@ export class Agent {
       this.logger?.info('恢复会话', { sessionId: this.sessionId, messages: restored.length });
     }
 
-    const dispatcher = new ToolDispatcher({
+    this.dispatcher = new ToolDispatcher({
       registry: options.registry,
       settings: options.settings,
       workspace: options.workspace,
@@ -152,7 +159,7 @@ export class Agent {
     this.loop = new AgentLoop({
       provider: options.provider,
       registry: options.registry,
-      dispatcher,
+      dispatcher: this.dispatcher,
       context: this.context,
       events: this.events,
       sessionId: this.sessionId,
@@ -189,7 +196,7 @@ export class Agent {
     }
 
     const signal = options.signal ?? new AbortController().signal;
-    const result = await this.loop.run(userText, { signal, metrics });
+    const result = await this.loop.run(userText, { signal, metrics, allowedTools: options.allowedTools });
 
     const snapshot = metrics.finish(started, result.iterations);
     this.activeMetrics = null;

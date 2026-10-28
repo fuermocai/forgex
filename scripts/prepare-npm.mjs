@@ -22,6 +22,20 @@ if (!existsSync(join(outDir, 'main.js'))) {
   throw new Error('dist-npm/main.js 不存在，请先运行 tsup --config tsup.npm.config.ts');
 }
 
+// 版本号必须三处一致：version.ts、根 package.json、apps/cli/package.json。
+// 不一致时直接失败，防止发出与仓库版本不符的包。
+const cliPkg = JSON.parse(await readFile(join(root, 'apps/cli/package.json'), 'utf8'));
+const rootPkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+const mismatches = [
+  ['apps/cli/package.json', cliPkg.version],
+  ['package.json（根）', rootPkg.version],
+].filter(([, v]) => v !== version);
+if (mismatches.length > 0) {
+  throw new Error(
+    `版本号不一致：version.ts=${version}，${mismatches.map(([f, v]) => `${f}=${v}`).join('，')}。发布前三处必须同步。`,
+  );
+}
+
 const packageName = process.env.FORGEX_NPM_PACKAGE ?? 'forgex-agent';
 const repositoryUrl = 'https://github.com/fuermocai/forgex';
 
