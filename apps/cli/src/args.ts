@@ -11,6 +11,7 @@
 const VALUE_FLAGS = new Set([
   'config',
   'session',
+  'at',
   'limit',
   'mode',
   'workspace',

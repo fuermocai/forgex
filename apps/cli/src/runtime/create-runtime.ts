@@ -17,7 +17,7 @@ import {
   type ApprovalHandler,
 } from '@forgex/security';
 import { ToolRegistry, createBuiltinTools } from '@forgex/tools';
-import { Agent, SessionStore } from '@forgex/core';
+import { Agent, SessionStore, type ForgeExtension } from '@forgex/core';
 import type { LoadedConfig, ResolvedConfig } from '../config/load-config.js';
 
 export interface CreateRuntimeOptions {
@@ -28,6 +28,7 @@ export interface CreateRuntimeOptions {
   logger?: Logger;
   /** 恢复指定会话 */
   sessionId?: string;
+  extensions?: ReadonlyArray<ForgeExtension>;
 }
 
 export interface ForgeRuntime {
@@ -70,11 +71,10 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
     protectedPaths: settings.protectedPaths,
   });
 
-  // 会话库是审计 sink 之一：即使外部 JSONL 文件不可写，审计事件也不会丢
+  // 主 JSONL 事件流同时保存会话与审计事件。
   const store = new SessionStore(config.session.dbPath);
   const audit = new AuditLogger({
     sinks: [store],
-    filePath: config.security.auditLogPath,
     logger,
   });
 
@@ -105,6 +105,7 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
     maxConcurrency: config.agent.maxConcurrency,
     logger,
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    ...(options.extensions ? { extensions: options.extensions } : {}),
   });
 
   return {

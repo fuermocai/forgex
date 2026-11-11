@@ -3,7 +3,7 @@
  *
  * 不使用 Mock 的"假工具结果"：这里启动一个本地 HTTP 服务模拟
  * OpenAI-compatible 模型，工具是真实的文件系统与真实读取逻辑，
- * 会话落库使用真实的 SQLite（node:sqlite）。
+ * 会话持久化使用真实的 JSONL 事件文件。
  *
  * 覆盖：
  *  - 工具调用闭环 + tool_call/tool_result 严格配对
@@ -34,7 +34,7 @@ import {
   createDefaultPolicySettings,
 } from '@forgex/security';
 import { ToolRegistry, createBuiltinTools } from '@forgex/tools';
-import { Agent, ContextManager, SessionStore, repairProtocol, type AgentRunResult } from '../src/index.js';
+import { Agent, ContextManager, SessionStore, repairProtocol, type AgentRunResult, type ForgeExtension } from '../src/index.js';
 
 /* ------------------------------------------------------------------ */
 /* 本地假模型服务                                                      */
@@ -177,11 +177,13 @@ function createAgent(options: {
   sessionId?: string;
   maxIterations?: number;
   repeatThreshold?: number;
+  contextWindow?: number;
+  extensions?: ReadonlyArray<ForgeExtension>;
 }): AgentFixture {
   const provider = createProvider({
     baseUrl: options.baseUrl,
     model: 'fake-model',
-    contextWindow: 8192,
+    contextWindow: options.contextWindow ?? 8192,
     maxOutputTokens: 1024,
     temperature: 0,
     timeoutMs: 5000,
@@ -212,6 +214,7 @@ function createAgent(options: {
     cwd: root,
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.maxIterations ? { maxIterations: options.maxIterations } : {}),
+    ...(options.extensions ? { extensions: options.extensions } : {}),
   });
 
   const events: AgentEvent[] = [];
@@ -420,6 +423,48 @@ describe('计划模式', () => {
 });
 
 describe('循环与取消', () => {
+  it('运行中收到 steering 时，在工具批次结束后加入上下文并继续', async () => {
+    fake = await startFakeModel((body, index) => {
+      if (index === 0) return { toolCalls: [toolCall('steer_call', 'read_file', { path: 'a.ts' })] };
+      const hasSteering = body.messages.some((message) => message.role === 'user' && message.content?.includes('改用接口 B'));
+      return { content: hasSteering ? '已按接口 B 调整' : '没有收到新指令' };
+    });
+
+    const fixture = createAgent({ baseUrl: fake.baseUrl });
+    fixture.agent.events.on((event) => {
+      if (event.type === 'tool:start' && event.callId === 'steer_call') {
+        fixture.agent.enqueueInput('改用接口 B', 'steer');
+      }
+    });
+    const result = await fixture.agent.run('查看代码');
+
+    expect(result.reason).toBe('completed');
+    expect(result.text).toContain('接口 B');
+    expect(fake.requests).toHaveLength(2);
+    expect(fixture.agent.listQueuedInputs()).toHaveLength(0);
+    expect(fixture.agent.messages().some((message) => message.role === 'user' && message.content === '改用接口 B')).toBe(true);
+    assertProtocolComplete(result, fixture);
+  });
+
+  it('follow-up 在当前任务结束后执行，且队列项可在开始前移除', async () => {
+    fake = await startFakeModel((_body, index) => ({ content: index === 0 ? '第一项完成' : '后续项完成', delayMs: 60 }));
+    const fixture = createAgent({ baseUrl: fake.baseUrl });
+    const running = fixture.agent.run('先处理当前任务');
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const queued = fixture.agent.enqueueInput('运行完后总结', 'followup');
+    const removed = fixture.agent.enqueueInput('不要执行这条', 'followup');
+    expect(fixture.agent.removeQueuedInput(removed.id)).toBe(true);
+
+    const result = await running;
+    expect(result.reason).toBe('completed');
+    expect(result.text).toBe('后续项完成');
+    expect(fake.requests).toHaveLength(2);
+    expect(fake.requests[1]!.messages.some((message) => message.role === 'user' && message.content?.includes('运行完后总结'))).toBe(true);
+    expect(fixture.agent.listQueuedInputs()).toHaveLength(0);
+    expect(fixture.events.some((event) => event.type === 'input:dequeued' && event.id === queued.id)).toBe(true);
+    expect(fixture.events.some((event) => event.type === 'input:removed' && event.id === removed.id)).toBe(true);
+  });
+
   it('连续相同工具调用触发循环检测，终止后仍补齐 tool 结果', async () => {
     fake = await startFakeModel((_body, index) => {
       // 永远返回同一个工具与同一组参数，模拟模型死循环
@@ -473,6 +518,20 @@ describe('循环与取消', () => {
 });
 
 describe('上下文管理', () => {
+  it('摘要压缩保留最新用户输入，并把摘要写成独立上下文记录', () => {
+    const manager = new ContextManager({ systemPrompt: 'system', contextWindow: 8192, maxOutputTokens: 1024 });
+    manager.append({ role: 'user', content: '旧目标：实现导出功能' });
+    manager.append({ role: 'assistant', content: '已定位导出入口' });
+    manager.append({ role: 'user', content: '当前输入：修复 CSV 转义' });
+    const source = manager.compactionSource();
+
+    expect(source?.text).toContain('旧目标');
+    expect(manager.compactWithSummary('当前目标：修复 CSV 转义\n约束：兼容旧格式')).toBe(true);
+    expect(manager.raw).toHaveLength(2);
+    expect(manager.raw[0]!.content).toContain('当前目标');
+    expect(manager.raw[1]!.content).toBe('当前输入：修复 CSV 转义');
+  });
+
   it('超预算时压缩历史，且不破坏 tool_call 与 tool_result 配对', () => {
     const manager = new ContextManager({
       systemPrompt: '你是测试助手',
@@ -554,5 +613,60 @@ describe('会话恢复', () => {
     expect(secondResult.text).toContain('历史已恢复');
     expect(second.agent.messages().length).toBeGreaterThan(first.agent.messages().length);
     assertProtocolComplete(secondResult, second);
+  });
+
+  it('上下文超预算时先生成结构化摘要，并保留原始消息记录', async () => {
+    fake = await startFakeModel((_body, index) => ({ content: index === 1 ? '当前目标：保留旧目标\n约束：只总结事实\n已确认事实：旧事实存在\n已完成工作：读取历史\n未完成工作：继续当前任务\n证据引用：消息历史' : '已处理' }));
+    const fixture = createAgent({ baseUrl: fake.baseUrl, contextWindow: 2048 });
+    const first = await fixture.agent.run(`历史目标：${'旧事实 '.repeat(220)}`);
+    expect(first.reason).toBe('completed');
+    const second = await fixture.agent.run('继续处理当前工作');
+
+    expect(second.reason).toBe('completed');
+    expect(fake.requests.length).toBe(3);
+    expect(fake.requests[1]!.tools).toBeUndefined();
+    expect(fake.requests[1]!.messages.some((message) => message.role === 'system' && message.content?.includes('证据引用'))).toBe(true);
+    expect(fixture.events.some((event) => event.type === 'context:compacted')).toBe(true);
+    expect(store.getMessages(second.sessionId).some((message) => message.content?.includes('历史目标'))).toBe(true);
+    expect(store.readEvents('context.compacted')).toHaveLength(1);
+  });
+
+  it('摘要格式无效时记录原因并回退到确定性压缩', async () => {
+    fake = await startFakeModel((_body, index) => ({ content: index === 1 ? '只给一个不完整摘要' : '已处理' }));
+    const fixture = createAgent({ baseUrl: fake.baseUrl, contextWindow: 2048 });
+    await fixture.agent.run(`历史目标：${'旧事实 '.repeat(220)}`);
+    const result = await fixture.agent.run('继续处理当前工作');
+
+    expect(result.reason).toBe('completed');
+    expect(fake.requests).toHaveLength(3);
+    expect(store.readEvents('context.compaction_failed')[0]?.data.reason).toBe('摘要缺少必需字段');
+    expect(fixture.events.some((event) => event.type === 'notice' && event.message.includes('回退到确定性压缩'))).toBe(true);
+  });
+
+  it('扩展命令执行，扩展事件订阅收到 Agent 生命周期事件', async () => {
+    fake = await startFakeModel(() => ({ content: '完成' }));
+    const observed: AgentEvent[] = [];
+    const extension: ForgeExtension = {
+      id: 'test.extension',
+      activate(api) {
+        api.registerCommand({ name: 'hello', description: 'test command', execute: (args) => { observed.push({ type: 'notice', level: 'info', message: args, ts: Date.now() }); } });
+        api.onEvent((event) => observed.push(event));
+      },
+    };
+    const fixture = createAgent({ baseUrl: fake.baseUrl, extensions: [extension] });
+    expect(fixture.agent.listExtensionCommands().map((command) => command.name)).toEqual(['hello']);
+    expect(await fixture.agent.executeExtensionCommand('hello', 'from test')).toBe(true);
+    await fixture.agent.run('run once');
+    expect(store.getAuditEvents(fixture.agent.sessionId).filter((event) => event.tool === 'extension:hello')).toHaveLength(2);
+    expect(observed.some((event) => event.type === 'notice' && event.message === 'from test')).toBe(true);
+    expect(observed.some((event) => event.type === 'user:message')).toBe(true);
+  });
+
+  it('拒绝与内置命令重名的扩展命令', async () => {
+    fake = await startFakeModel(() => ({ content: 'unused' }));
+    expect(() => createAgent({
+      baseUrl: fake!.baseUrl,
+      extensions: [{ id: 'test.extension', activate(api) { api.registerCommand({ name: 'help', description: 'shadow built-in', execute() {} }); } }],
+    })).toThrow(/命令名非法或重复/);
   });
 });

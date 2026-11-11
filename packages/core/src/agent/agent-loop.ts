@@ -52,6 +52,10 @@ export interface AgentLoopOptions {
   onModelUsage?: (totalTokens: number) => void;
   /** 可在工具执行前拒绝整批调用，避免越过子代理工具预算 */
   beforeToolCalls?: (count: number) => boolean;
+  /** 取出已排队的 steering 指令；只在一批工具执行完成后消费 */
+  takeSteering?: () => Array<{ id: string; text: string }>;
+  onContextCompacted?: (summary: string, sourceMessages: number) => void;
+  onContextCompactionFailed?: (reason: string, sourceMessages: number) => void;
 }
 
 export interface LoopRunOptions {
@@ -94,6 +98,9 @@ export class AgentLoop {
   private readonly onModelRequest: ((iteration: number) => void) | undefined;
   private readonly onModelUsage: ((totalTokens: number) => void) | undefined;
   private readonly beforeToolCalls: ((count: number) => boolean) | undefined;
+  private readonly takeSteering: (() => Array<{ id: string; text: string }>) | undefined;
+  private readonly onContextCompacted: ((summary: string, sourceMessages: number) => void) | undefined;
+  private readonly onContextCompactionFailed: ((reason: string, sourceMessages: number) => void) | undefined;
 
   constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -111,6 +118,9 @@ export class AgentLoop {
     this.onModelRequest = options.onModelRequest;
     this.onModelUsage = options.onModelUsage;
     this.beforeToolCalls = options.beforeToolCalls;
+    this.takeSteering = options.takeSteering;
+    this.onContextCompacted = options.onContextCompacted;
+    this.onContextCompactionFailed = options.onContextCompactionFailed;
   }
 
   /** 运行时切换模型（Provider 实例整体替换，下一轮请求生效） */
@@ -140,6 +150,7 @@ export class AgentLoop {
     let iterations = 0;
     let totalToolCalls = 0;
     const allToolResults: Array<{ toolName: string; result: ToolResult }> = [];
+    let compactionAttempted = false;
 
     for (let iteration = 1; ; iteration += 1) {
       if (this.maxIterations !== undefined && iteration > this.maxIterations) {
@@ -161,7 +172,43 @@ export class AgentLoop {
         return { text: lastText, reason: 'aborted', iterations: iteration - 1, toolCalls: totalToolCalls, toolResults: allToolResults };
       }
 
-      // 2. 构建上下文（必要时压缩）并做协议修复
+      // 2. Prefer a reviewable summary while preserving the original session log.
+      if (!compactionAttempted && this.context.needsCompaction) {
+        compactionAttempted = true;
+        const source = this.context.compactionSource(Math.min(48_000, this.context.budgetTokens() * 2));
+        if (source) {
+          const compactionStarted = Date.now();
+          try {
+            const compacted = await this.provider.chat({
+              messages: [
+                { role: 'system', content: '压缩编码任务会话历史。只保留可确认的信息，不要推测。按固定标题输出：当前目标、约束、已确认事实、已完成工作、未完成工作、证据引用。' },
+                { role: 'user', content: source.text },
+              ],
+              tools: [],
+              signal,
+            });
+            metrics.recordModelCall({ durationMs: Date.now() - compactionStarted, firstTokenMs: null, ...compacted.usage });
+            this.onModelUsage?.(compacted.usage.totalTokens);
+            const summary = compacted.message.content?.trim() ?? '';
+            if (isStructuredSummary(summary) && this.context.compactWithSummary(summary)) {
+              this.onContextCompacted?.(summary, source.messageCount);
+              this.events.emit({ type: 'context:compacted', summary, sourceMessages: source.messageCount, ts: Date.now() });
+            } else {
+              const reason = summary ? '摘要缺少必需字段' : '模型返回空摘要';
+              this.onContextCompactionFailed?.(reason, source.messageCount);
+              this.logger?.warn('摘要压缩失败，回退到确定性压缩', { reason });
+              this.events.emit({ type: 'notice', level: 'warn', message: '上下文摘要格式无效，已回退到确定性压缩', ts: Date.now() });
+            }
+          } catch (err) {
+            const reason = describeError(err);
+            this.onContextCompactionFailed?.(reason, source.messageCount);
+            this.logger?.warn('摘要压缩失败，回退到确定性压缩', { error: reason });
+            this.events.emit({ type: 'notice', level: 'warn', message: '上下文摘要失败，已回退到确定性压缩', ts: Date.now() });
+          }
+        }
+      }
+
+      // 3. 构建上下文（必要时确定性兜底压缩）并做协议修复
       const built = this.context.build();
       if (built.compressed) {
         this.events.emit({
@@ -345,6 +392,12 @@ export class AgentLoop {
       this.appendToolMessages(toolCalls, results);
       totalToolCalls += toolCalls.length;
 
+      for (const queued of this.takeSteering?.() ?? []) {
+        this.append([{ role: 'user', content: queued.text }]);
+        this.events.emit({ type: 'input:dequeued', id: queued.id, mode: 'steer', ts: Date.now() });
+        this.events.emit({ type: 'user:message', text: queued.text, ts: Date.now() });
+      }
+
       if (signal.aborted) {
         return { text: lastText, reason: 'aborted', iterations, toolCalls: totalToolCalls, toolResults: allToolResults };
       }
@@ -384,6 +437,11 @@ export class AgentLoop {
     });
     this.append(messages);
   }
+}
+
+function isStructuredSummary(summary: string): boolean {
+  const required = ['当前目标', '约束', '已确认事实', '已完成工作', '未完成工作', '证据引用'];
+  return required.every((heading) => new RegExp(`(?:^|\\n)\\s*[#* -]*${heading}\\s*[:：]?`, 'm').test(summary));
 }
 
 /* ------------------------------------------------------------------ */

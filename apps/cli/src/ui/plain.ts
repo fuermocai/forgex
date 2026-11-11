@@ -35,6 +35,7 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
 
   let busy = false;
   let controller: AbortController | null = null;
+  let activeRun: Promise<void> | null = null;
 
   rl.on('SIGINT', () => {
     if (busy && controller) {
@@ -62,9 +63,30 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
     const text = line.trim();
     if (!text) continue;
 
-    if (text === '/exit' || text === '/quit') break;
+    if (text === '/exit' || text === '/quit') {
+      if (busy && controller) controller.abort();
+      break;
+    }
+    if (busy) {
+      if (text === '/queue') {
+        const items = agent.listQueuedInputs();
+        stdout.write(items.length ? `${items.map((item) => `${item.id} [${item.mode}] ${item.text}`).join('\n')}\n` : '排队队列为空\n');
+      } else if (text.startsWith('/queue-remove ')) {
+        const id = text.slice('/queue-remove '.length).trim();
+        stdout.write(agent.removeQueuedInput(id) ? `[提示] 已移除 ${id}\n` : `[错误] 队列中没有 ${id}\n`);
+      } else if (text.startsWith('/followup ')) {
+        const queued = agent.enqueueInput(text.slice('/followup '.length), 'followup');
+        stdout.write(`[提示] 已排队 follow-up: ${queued.id}\n`);
+      } else if (text.startsWith('/')) {
+        stdout.write('[提示] 任务运行中；可发送普通文本作为 steering，或用 /followup 排队后续任务。\n');
+      } else {
+        const queued = agent.enqueueInput(text, 'steer');
+        stdout.write(`[提示] 已排队 steering: ${queued.id}\n`);
+      }
+      continue;
+    }
     if (text === '/help') {
-      printHelp();
+      printHelp(agent.listExtensionCommands());
       continue;
     }
     if (text === '/session') {
@@ -176,30 +198,39 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
       stdout.write('[提示] 纯文本模式不支持交互式向导，可用 /key <API Key> 直接填写；完整向导请运行：forgex connect\n');
       continue;
     }
+    if (text.startsWith('/')) {
+      const [name, ...args] = text.slice(1).split(/\s+/);
+      try {
+        if (!await agent.executeExtensionCommand(name!, args.join(' '))) stdout.write(`[错误] 未知命令: /${name}\n`);
+      } catch (err) {
+        stdout.write(`[错误] 扩展命令失败：${err instanceof Error ? err.message : String(err)}\n`);
+      }
+      continue;
+    }
 
     busy = true;
     controller = new AbortController();
-    try {
-      const result = await agent.run(text, { signal: controller.signal });
+    const signal = controller.signal;
+    activeRun = agent.run(text, { signal }).then((result) => {
       const metrics = result.metrics;
       const status = result.reason === 'completed' ? '完成' : result.reason === 'aborted' ? '已取消' : '未完成';
       stdout.write(
         `\n[${status}] 结束原因=${result.reason} 用时=${formatMs(metrics.totalMs)} ` +
-          `模型=${metrics.modelCalls} 次 工具=${metrics.toolCalls} 次 ` +
-          `tokens=${metrics.totalTokens}\n`,
+          `模型=${metrics.modelCalls} 次 工具=${metrics.toolCalls} 次 tokens=${metrics.totalTokens}\n`,
       );
       if (result.reason !== 'completed') {
         if (result.error) stdout.write(`[错误] ${result.error.code}: ${result.error.message}\n`);
-        else stdout.write(`[提示] 本轮没有完成，请根据结束原因决定是否继续。\n`);
+        else stdout.write('[提示] 本轮没有完成，请根据结束原因决定是否继续。\n');
       }
-    } catch (err) {
+    }).catch((err: unknown) => {
       stdout.write(`[错误] ${err instanceof Error ? err.message : String(err)}\n`);
-    } finally {
+    }).finally(() => {
       busy = false;
       controller = null;
-    }
+    });
   }
 
+  if (activeRun) await activeRun;
   off();
   rl.close();
   runtime.close();
@@ -240,7 +271,7 @@ function printEvent(event: AgentEvent, state: { streamed: boolean }): void {
   }
 }
 
-function printHelp(): void {
+function printHelp(extensionCommands: ReadonlyArray<{ name: string; description: string }> = []): void {
   stdout.write(
     [
       '可用命令：',
@@ -251,7 +282,11 @@ function printHelp(): void {
       '  /connect          提示退出后运行 forgex connect（完整向导）',
       '  /session          显示当前会话 id',
       '  /context          显示上下文 token 估算',
+      '  /queue            查看运行中排队输入；普通输入会作为 steering',
+      '  /followup <文本>  当前任务完成后执行',
+      '  /queue-remove <id> 移除尚未执行的输入',
       '  /exit             退出',
+      ...extensionCommands.map((command) => `  /${command.name}  ${command.description}`),
       '',
     ].join('\n'),
   );

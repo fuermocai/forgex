@@ -2,7 +2,7 @@
  * Autonomous Task Runner 测试（v0.5.0 Phase 2）。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { BudgetTracker, DEFAULT_BUDGET_LIMITS, LIGHT_BUDGET_LIMITS, HEAVY_BUDGET_LIMITS } from '../src/budget/execution-budget.js';
 import { AutonomousRunner, type AutonomousStepExecutor, type PlannedStep } from '../src/runner/autonomous-runner.js';
 import { ContinuationManager } from '../src/continuation/continuation-manager.js';
@@ -188,7 +188,7 @@ describe('AutonomousRunner 基本流程', () => {
 });
 
 describe('ContinuationManager', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let store: CheckpointStore;
   let verifier: RecoveryVerifier;
   let cm: ContinuationManager;
@@ -203,7 +203,7 @@ describe('ContinuationManager', () => {
   }
 
   beforeEach(() => {
-    db = new DatabaseSync(':memory:');
+    db = new JsonlEventStore(':memory:');
     store = new CheckpointStore(db);
     verifier = new RecoveryVerifier({ environmentProvider: makeEnv, currentPolicyVersion: 'v1' });
     cm = new ContinuationManager({ checkpointStore: store, recoveryVerifier: verifier, checkpointInterval: 2 });

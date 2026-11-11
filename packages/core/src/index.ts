@@ -5,6 +5,7 @@
  * 不直接依赖内部文件布局，便于后续重构。
  */
 export * from './agent/agent.js';
+export * from './agent/extensions.js';
 export * from './agent/agent-loop.js';
 export * from './agent/system-prompt.js';
 export * from './context/context-manager.js';
@@ -23,6 +24,7 @@ export {
 } from './context/evidence-store.js';
 export type { EvidenceRef as StoredEvidenceRef } from './context/evidence-store.js';
 export * from './session/session-store.js';
+export * from './session/jsonl-event-store.js';
 export * from './runtime/metrics.js';
 export * from './runtime/tool-dispatcher.js';
 export * from './events/event-bus.js';

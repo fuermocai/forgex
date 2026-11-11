@@ -186,6 +186,11 @@ export interface ApprovalRequest {
 export type AgentEvent =
   | { type: 'session:start'; sessionId: string; ts: number }
   | { type: 'user:message'; text: string; ts: number }
+  | { type: 'input:queued'; id: string; mode: 'steer' | 'followup'; text: string; position: number; ts: number }
+  | { type: 'input:dequeued'; id: string; mode: 'steer' | 'followup'; ts: number }
+  | { type: 'input:removed'; id: string; mode: 'steer' | 'followup'; ts: number }
+  | { type: 'input:queue'; items: Array<{ id: string; mode: 'steer' | 'followup'; text: string }>; ts: number }
+  | { type: 'context:compacted'; summary: string; sourceMessages: number; ts: number }
   | { type: 'model:request'; attempt: number; messageCount: number; estimatedTokens: number; ts: number }
   | { type: 'assistant:delta'; text: string; ts: number }
   | { type: 'assistant:message'; text: string; toolCalls: ToolCall[]; ts: number }

@@ -91,6 +91,9 @@ const COMMANDS = [
   { name: '/connect', desc: '连接模型向导（provider → baseUrl → Key → 模型）' },
   { name: '/context', desc: '查看上下文 token 用量' },
   { name: '/session', desc: '显示当前会话 ID' },
+  { name: '/queue', desc: '查看运行中排队的指令' },
+  { name: '/queue-remove', desc: '移除队列项：/queue-remove <id>' },
+  { name: '/followup', desc: '当前任务完成后执行：/followup <指令>' },
   { name: '/help', desc: '帮助与快捷键' },
   { name: '/exit', desc: '退出 ForgeX' },
 ];
@@ -104,6 +107,9 @@ const HELP = [
   '  /connect  连接模型向导：选提供方 → 确认 baseUrl → 输入 Key → 选模型',
   '  /context  显示上下文 token 估算',
   '  /session  显示会话 id',
+  '  /queue    查看运行中排队的指令；运行时普通输入会作为 steering 插入',
+  '  /queue-remove <id>  移除尚未执行的队列项',
+  '  /followup <指令>  当前任务完成后执行',
   '  /help     显示帮助',
   '  /exit     退出',
   '',
@@ -131,6 +137,7 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [metrics, setMetrics] = useState<RunMetrics | null>(null);
   const [contextTokens, setContextTokens] = useState(0);
+  const [queuedInputs, setQueuedInputs] = useState<Array<{ id: string; mode: 'steer' | 'followup'; text: string }>>([]);
   const [modelName, setModelName] = useState(agent.modelName);
   const [mode, setMode] = useState(agent.permissionMode);
   const [planMode, setPlanMode] = useState(agent.isPlanMode);
@@ -206,6 +213,9 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
         }
         case 'notice':
           push(event.level === 'error' ? 'error' : 'notice', event.message);
+          break;
+        case 'input:queue':
+          setQueuedInputs(event.items);
           break;
         case 'approval:resolved':
           setApproval(null);
@@ -462,7 +472,7 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
 
   const handleSlash = useCallback(
     (text: string) => {
-      const [name, ...rest] = text.split(/\s+/);
+      const [name = '', ...rest] = text.split(/\s+/);
       const arg = rest.join(' ').trim();
 
       switch (name) {
@@ -471,11 +481,40 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
           exit();
           return;
         case '/help':
-          push('notice', HELP);
+          push('notice', [...HELP.split('\n'), ...agent.listExtensionCommands().map((command) => `  /${command.name}  ${command.description}`)].join('\n'));
           return;
         case '/session':
           push('notice', `会话 id: ${agent.sessionId}`);
           return;
+        case '/queue': {
+          const items = agent.listQueuedInputs();
+          push('notice', items.length === 0
+            ? '排队队列为空'
+            : items.map((item, index) => `${index + 1}. [${item.mode}] ${item.id}: ${item.text}`).join('\n'));
+          return;
+        }
+        case '/queue-remove': {
+          if (!arg) {
+            push('error', '用法：/queue-remove <队列项 id>（先用 /queue 查看）');
+            return;
+          }
+          const removed = agent.removeQueuedInput(arg);
+          push(removed ? 'notice' : 'error', removed ? `已移除队列项 ${arg}` : `没有找到可移除的队列项 ${arg}`);
+          return;
+        }
+        case '/followup': {
+          if (!arg) {
+            push('error', '用法：/followup <当前任务完成后执行的指令>');
+            return;
+          }
+          if (!busy) {
+            push('notice', '当前没有运行中的任务；请直接发送该指令');
+            return;
+          }
+          const queued = agent.enqueueInput(arg, 'followup');
+          push('notice', `已排队 follow-up：${queued.id}`);
+          return;
+        }
         case '/context': {
           const tokens = agent.contextTokens();
           setContextTokens(tokens);
@@ -570,7 +609,13 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
           return;
         }
         default:
-          push('error', `未知命令: ${name}（输入 /help 查看）`);
+          if (name.startsWith('/')) {
+            void agent.executeExtensionCommand(name.slice(1), arg).then((handled) => {
+              if (!handled) push('error', `未知命令: ${name}（输入 /help 查看）`);
+            }).catch((err: unknown) => push('error', `扩展命令失败：${err instanceof Error ? err.message : String(err)}`));
+          } else {
+            push('error', `未知命令: ${name}（输入 /help 查看）`);
+          }
       }
     },
     [agent, applyKey, busy, exit, push, runtime, switchModel],
@@ -598,7 +643,14 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
       handleSlash(text);
       return;
     }
-    if (busy || connecting) return;
+    if (busy) {
+      const queued = agent.enqueueInput(text, 'steer');
+      setInput('');
+      setCursor(0);
+      push('notice', `已排队 steering：${queued.id}（当前工具批次结束后生效）`);
+      return;
+    }
+    if (connecting) return;
 
     setInput('');
     setCursor(0);
@@ -643,8 +695,12 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
 
   /* ---------------- 键盘 ---------------- */
 
+  const availableCommands = [
+    ...COMMANDS,
+    ...agent.listExtensionCommands().map((command) => ({ name: `/${command.name}`, desc: command.description })),
+  ];
   const palette = !wizard && !keyEntry && !busy && !connecting && input.startsWith('/') && !input.includes(' ')
-    ? COMMANDS.filter((command) => command.name.startsWith(input.toLowerCase()))
+    ? availableCommands.filter((command) => command.name.startsWith(input.toLowerCase()))
     : [];
   const selectedPalette = palette[Math.min(paletteIndex, Math.max(0, palette.length - 1))];
 
@@ -734,7 +790,7 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
       return;
     }
 
-    if (busy || connecting) return;
+    if (connecting) return;
 
     if (palette.length > 0) {
       if (key.upArrow) {
@@ -788,6 +844,12 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
           {tool.detail ? <Text dimColor>  {tool.detail}</Text> : null}
         </Box>
       ))}
+      {queuedInputs.length > 0 ? (
+        <Box paddingLeft={2}>
+          <Text color={THEME.warning}>排队输入 {queuedInputs.length} 条</Text>
+          <Text dimColor> · {queuedInputs.map((item) => `${item.mode}: ${item.text}`).join(' | ')}</Text>
+        </Box>
+      ) : null}
 
       {streaming.length > 0 ? (
         <Box marginTop={1}>

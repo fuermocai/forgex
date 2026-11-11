@@ -121,6 +121,8 @@ function printHelp(): void {
       '      审阅任务产物：diff 看 worktree 差异、clean 显式清理、',
       '      diagnose 中断诊断、reconcile 人工核对（--confirm-done/--confirm-retry/--block）、',
       '      resume 安全恢复（只有未开始步骤会自动调度，副作用未知的步骤必须先 reconcile）',
+      '  sessions [--limit <n>] | sessions fork <sessionId> [--at <messageEventId>]',
+      '      查看 JSONL 会话或从某条消息分叉继续',
       '',
       '通用选项：',
       '  --mode <模式>      权限模式：readonly | standard | trusted | yolo，优先级高于配置文件与环境变量',

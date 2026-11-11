@@ -19,11 +19,13 @@ import {
   type PermissionMode,
   type PolicySettings,
   type RunMetrics,
+  uuid,
 } from '@forgex/shared';
 import type { ModelProvider } from '@forgex/models';
 import type { ToolRegistry } from '@forgex/tools';
 import type { ApprovalManager, AuditLogger, WorkspaceGuard } from '@forgex/security';
 import { AgentLoop, type LoopResult } from './agent-loop.js';
+import { ExtensionRegistry, type ExtensionCommand, type ForgeExtension } from './extensions.js';
 import { buildSystemPrompt } from './system-prompt.js';
 import { ContextManager } from '../context/context-manager.js';
 import { EventBus } from '../events/event-bus.js';
@@ -61,6 +63,8 @@ export interface AgentOptions {
   maxIterations?: number;
   maxConcurrency?: number;
   logger?: Logger;
+  /** Trusted in-process extensions. Extension tools remain subject to normal policy, approval and audit. */
+  extensions?: ReadonlyArray<ForgeExtension>;
 }
 
 export interface AgentRunOptions {
@@ -71,6 +75,12 @@ export interface AgentRunOptions {
    * 不传 = 不做过滤（默认行为，全 registry 可见）。
    */
   allowedTools?: ReadonlySet<string>;
+}
+
+export interface QueuedAgentInput {
+  id: string;
+  mode: 'steer' | 'followup';
+  text: string;
 }
 export interface AgentRunResult extends LoopResult {
   sessionId: string;
@@ -90,6 +100,7 @@ export class Agent {
   /** 公共只读：CLI 层质量门禁等需要直接走 ToolDispatcher 执行工具（绕开 AgentLoop，保持确定性） */
   readonly dispatcher: ToolDispatcher;
   private readonly store: SessionStore | undefined;
+  private readonly audit: AuditLogger;
   private readonly logger: Logger | undefined;
   /** 当前轮次的指标收集器（审批回调需要） */
   private activeMetrics: MetricsCollector | null = null;
@@ -97,13 +108,18 @@ export class Agent {
   private planMode = false;
   /** 进入计划模式前的权限模式，退出时还原 */
   private modeBeforePlan: PermissionMode | null = null;
+  private readonly queuedInputs: QueuedAgentInput[] = [];
+  private running = false;
+  private readonly extensions = new ExtensionRegistry();
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
     this.settings = options.settings;
     this.logger = options.logger;
     this.store = options.store;
+    this.audit = options.audit;
     this.events = new EventBus(options.logger);
+    this.extensions.activate(options.extensions ?? [], options.registry, this.events);
 
     const workspaceRoot = options.settings.workspaceRoots[0] ?? options.cwd ?? process.cwd();
     this.sessionId = options.sessionId ?? newSessionId();
@@ -166,6 +182,13 @@ export class Agent {
       ...(options.maxIterations ? { maxIterations: options.maxIterations } : {}),
       ...(options.logger ? { logger: options.logger } : {}),
       persistMessage: (message) => this.persist(message),
+      takeSteering: () => this.takeInputs('steer'),
+      onContextCompacted: (summary, sourceMessages) => {
+        this.store?.appendEvent('context.compacted', { sessionId: this.sessionId, summary, sourceMessages });
+      },
+      onContextCompactionFailed: (reason, sourceMessages) => {
+        this.store?.appendEvent('context.compaction_failed', { sessionId: this.sessionId, reason, sourceMessages });
+      },
     });
   }
 
@@ -177,6 +200,8 @@ export class Agent {
     if (!userText.trim()) {
       throw new ForgeError('CONFIG_INVALID', '用户输入不能为空');
     }
+    if (this.running) throw new ForgeError('CONFIG_INVALID', 'Agent 正在运行；请使用 enqueueInput 排队新指令');
+    this.running = true;
 
     const started = Date.now();
     const metrics = new MetricsCollector(this.sessionId);
@@ -196,7 +221,39 @@ export class Agent {
     }
 
     const signal = options.signal ?? new AbortController().signal;
-    const result = await this.loop.run(userText, { signal, metrics, allowedTools: options.allowedTools });
+    let result: LoopResult;
+    let nextText = userText;
+    let totalIterations = 0;
+    let totalToolCalls = 0;
+    let allToolResults: NonNullable<LoopResult['toolResults']> = [];
+    try {
+      for (;;) {
+        result = await this.loop.run(nextText, { signal, metrics, allowedTools: options.allowedTools });
+        totalIterations += result.iterations;
+        totalToolCalls += result.toolCalls;
+        allToolResults = allToolResults.concat(result.toolResults ?? []);
+        if (result.reason !== 'completed' || signal.aborted) break;
+
+        const steering = this.takeInputs('steer');
+        const followup = steering.length > 0 ? [] : this.takeInputs('followup', 1);
+        const queued = steering.length > 0 ? steering : followup;
+        if (queued.length === 0) break;
+        for (const item of queued) {
+          this.events.emit({ type: 'input:dequeued', id: item.id, mode: item.mode, ts: Date.now() });
+        }
+        nextText = queued.map((item) => item.text).join('\n\n');
+      }
+    } finally {
+      this.running = false;
+      this.emitInputQueue();
+    }
+
+    result = {
+      ...result!,
+      iterations: totalIterations,
+      toolCalls: totalToolCalls,
+      toolResults: allToolResults,
+    };
 
     const snapshot = metrics.finish(started, result.iterations);
     this.activeMetrics = null;
@@ -212,6 +269,61 @@ export class Agent {
     }
 
     return { ...result, sessionId: this.sessionId, metrics: snapshot };
+  }
+
+  /** 排队输入；steer 在当前工具批次后插入，followup 在当前任务完成后执行。 */
+  enqueueInput(text: string, mode: 'steer' | 'followup' = 'steer'): QueuedAgentInput {
+    const trimmed = text.trim();
+    if (!trimmed) throw new ForgeError('CONFIG_INVALID', '排队指令不能为空');
+    const item = { id: uuid(), mode, text: trimmed };
+    this.queuedInputs.push(item);
+    this.events.emit({ type: 'input:queued', ...item, position: this.queuedInputs.length, ts: Date.now() });
+    this.emitInputQueue();
+    return item;
+  }
+
+  listQueuedInputs(): ReadonlyArray<QueuedAgentInput> {
+    return this.queuedInputs.map((item) => ({ ...item }));
+  }
+
+  removeQueuedInput(id: string): boolean {
+    const index = this.queuedInputs.findIndex((item) => item.id === id);
+    if (index < 0) return false;
+    const [removed] = this.queuedInputs.splice(index, 1);
+    this.events.emit({ type: 'input:removed', id: removed!.id, mode: removed!.mode, ts: Date.now() });
+    this.emitInputQueue();
+    return true;
+  }
+
+  listExtensionCommands(): ExtensionCommand[] { return this.extensions.listCommands(); }
+  async executeExtensionCommand(name: string, args: string): Promise<boolean> {
+    const command = this.extensions.listCommands().find((item) => item.name === name);
+    if (!command) return false;
+    const started = Date.now();
+    await this.audit.record({ type: 'command', sessionId: this.sessionId, tool: `extension:${name}`, input: { args }, actor: 'user', reason: '扩展命令由用户显式调用' });
+    try {
+      await command.execute(args);
+      await this.audit.record({ type: 'command', sessionId: this.sessionId, tool: `extension:${name}`, input: { args }, ok: true, durationMs: Date.now() - started, actor: 'system' });
+      return true;
+    } catch (err) {
+      await this.audit.record({ type: 'command', sessionId: this.sessionId, tool: `extension:${name}`, input: { args }, ok: false, durationMs: Date.now() - started, reason: err instanceof Error ? err.message : String(err), actor: 'system' });
+      throw err;
+    }
+  }
+
+  private takeInputs(mode: QueuedAgentInput['mode'], limit = Number.POSITIVE_INFINITY): QueuedAgentInput[] {
+    const taken = this.queuedInputs.filter((item) => item.mode === mode).slice(0, limit);
+    if (taken.length === 0) return [];
+    const ids = new Set(taken.map((item) => item.id));
+    for (let i = this.queuedInputs.length - 1; i >= 0; i -= 1) {
+      if (ids.has(this.queuedInputs[i]!.id)) this.queuedInputs.splice(i, 1);
+    }
+    this.emitInputQueue();
+    return taken;
+  }
+
+  private emitInputQueue(): void {
+    this.events.emit({ type: 'input:queue', items: this.listQueuedInputs().map(({ id, mode, text }) => ({ id, mode, text })), ts: Date.now() });
   }
 
   /** 当前上下文估算（供 CLI 状态栏使用） */

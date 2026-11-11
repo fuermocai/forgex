@@ -1,5 +1,5 @@
 /**
- * /models 运行时切换测试：真实 Runtime + 临时配置 + SQLite。
+ * /models 运行时切换测试：真实 Runtime + 临时配置 + JSONL 持久化。
  *
  * 不发起网络请求：只验证 Provider 替换、上下文预算、会话保留与配置落盘。
  */
@@ -33,7 +33,7 @@ beforeEach(async () => {
           stream: true,
         },
         security: { mode: 'standard', workspaceRoots: ['.'] },
-        session: { dbPath: '.forgex/sessions.db' },
+        session: { dbPath: '.forgex/events.jsonl' },
         agent: { maxIterations: 12, maxConcurrency: 3 },
       },
       null,
