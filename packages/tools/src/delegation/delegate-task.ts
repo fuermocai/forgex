@@ -52,7 +52,7 @@ export type DelegateTaskExecutor = (
 export function createDelegateTaskTool(execute: DelegateTaskExecutor): ToolDefinition<DelegateTaskInput> {
   return {
     name: 'delegate_task',
-    description: '把互相独立的编码任务交给子 Agent 并行执行。每个子 Agent 在派发时父工作区的独立 Git 快照中工作；返回状态、改动路径和可审阅 patch，不会自动合并。子 Agent 仍受当前审批策略约束。Git worktree 是目录隔离，不是操作系统沙箱。',
+    description: '把互相独立的编码任务交给子 Agent 并行执行。父 Agent 的派发审批通过后，worker 使用 yolo 权限模式，不再逐项请求审批；CommandGuard/PolicyEngine 硬拒绝规则以及文件工具的保护路径和 WorkspaceGuard 检查仍生效。每个子 Agent 在派发时父工作区的独立 Git 快照中工作；返回状态、改动路径和可审阅 patch，不会自动合并。Git worktree 是目录隔离，不是操作系统沙箱，命令进程仍可能访问外部文件或网络。',
     parameters: inputSchema as unknown as ToolDefinition<DelegateTaskInput>['parameters'],
     riskLevel: 'execute',
     timeoutMs: 1_800_000,

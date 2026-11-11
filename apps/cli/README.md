@@ -85,6 +85,8 @@ forgex config                   # 查看最终生效配置（Key 脱敏）
 仓库有未提交改动时会直接拒绝，不会 stash/reset。
 `delegate_task` 只在实际会话运行时注册；静态 `forgex tools` 清单不会列出没有执行器的动态工具。会话式 Agent 可一次提交多个独立任务，每个子 Agent 从派发时的 Git 快照创建单独 worktree，完成后返回状态、改动路径和 patch 预览；patch 完整文件默认保存在 `.forgex/subagents/`（与事件日志同目录），不会自动合并回父工作区。父工作区可以有未提交和未跟踪改动，所有 worker 共用同一派发基线。文件工具的读写根限制为 worker 自己的 worktree；命令仍走当前执行策略与审批，worktree 不会限制进程访问外部文件或网络。
 
+父 Agent 对 `delegate_task` 的审批通过后，worker 使用内部 `yolo` 权限模式，不再逐项弹出写入/命令审批。CommandGuard/PolicyEngine 硬拒绝规则以及文件工具的保护路径和 WorkspaceGuard 检查仍然生效；命令进程仍可能访问 worker 目录之外的文件或网络，请只委派可信任务。
+
 子 Agent 并发通过 `agent.subagentMaxConcurrency` 配置，默认 `3`，可设为 `0` 表示不设并发上限；最大配置值为 `32`。子 Agent 不会继续派生子 Agent。包含 Git 子模块或配置了外部 Git clean/smudge/process filter 的仓库会拒绝派发，避免生成不完整快照或运行仓库配置的外部程序。Git worktree 只隔离工作目录，不是 OS 沙箱，也不限制进程访问工作区以外的文件或网络。
 `forgex workflows [<id>]` 可查看内置工作流。`run --workflow <id>` 会把所选工作流阶段作为任务规划提示；任务仍由现有计划执行器和质量门禁负责。`run --requirements` 根据计划生成需求分析与验收标准草案，并将追踪记录写入事件日志；模型生成的验收标准全部标记为未批准，不会伪装成用户确认，也不会阻止当前任务执行。
 

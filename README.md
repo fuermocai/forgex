@@ -106,6 +106,8 @@ cargo build --release --manifest-path crates/executor/Cargo.toml
 
 `subagentMaxConcurrency` 控制 `delegate_task` 的并发数，默认 `3`，最大 `32`；设为 `0` 表示不设并发上限。`delegate_task` 为每项工作创建基于派发时 Git 快照的独立 worktree，返回 patch 预览并将完整 patch 默认保存在 `.forgex/subagents/`（与事件日志同目录），不会自动合并。Git worktree 仅隔离工作目录，不是 OS 沙箱。
 
+父 Agent 的 `delegate_task` 审批通过后，worker 使用内部 `yolo` 权限模式，不再逐项请求审批；命令硬拒绝规则和文件工具的保护路径/WorkspaceGuard 检查仍有效。执行命令的进程可能访问 worker 目录以外的文件或网络。
+
 Agent 默认持续运行，直到模型结束或用户取消。需要限制模型请求次数时，可在 `agent` 中显式设置 `"maxIterations": 20`，或设置环境变量 `FORGEX_MAX_ITERATIONS=20`；达到该上限会以未完成状态返回。
 
 命令工具接收程序名和参数数组，不接受整段 shell 命令。Windows 下可直接调用 `pnpm`、`npm` 等命令，ForgeX 会在 PATH 中没有原生可执行文件时解析对应的 `.cmd` / `.bat` 包装器；解释器内联代码（如 `node -p`、`node -e`）仍会被安全策略拒绝，请将脚本保存为工作区文件后运行。

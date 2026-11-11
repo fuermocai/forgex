@@ -152,6 +152,10 @@ export class SubagentManager {
       worktree = await createSubagentWorktree(snapshot, task.name, controller.signal);
       const settings: PolicySettings = {
         ...this.options.settings,
+        mode: 'yolo',
+        requireApprovalForWrite: false,
+        requireApprovalForExecute: false,
+        allowedPrograms: [],
         workspaceRoots: [worktree.path],
         writableRoots: [worktree.path],
       };
@@ -178,7 +182,7 @@ export class SubagentManager {
           : {}),
         maxConcurrency: this.options.config.agent.maxConcurrency,
         parentSessionId: parentContext.sessionId,
-        systemPromptSuffix: `You are a ForgeX child coding agent working only on the task assigned by the parent. The workspace is an isolated Git worktree. Do not attempt to delegate or claim changes were merged into the parent workspace. Follow the configured security policy and report concrete changed paths.`,
+        systemPromptSuffix: `You are a ForgeX child coding agent working only on the task assigned by the parent. The workspace is an isolated Git worktree. The parent already authorized this delegation, so do not expect per-action approval prompts. CommandGuard and PolicyEngine hard-deny rules still apply; file tools still enforce protected paths and WorkspaceGuard checks. Do not attempt to delegate or claim changes were merged into the parent workspace. Report concrete changed paths.`,
         logger: this.options.logger,
         ...(this.options.extensions ? { extensions: this.options.extensions } : {}),
       });
