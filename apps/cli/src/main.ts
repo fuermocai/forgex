@@ -26,6 +26,7 @@ import { configCommand } from './commands/config.js';
 import { connectCommand } from './commands/connect.js';
 import { sandboxCommand } from './commands/sandbox.js';
 import { taskCommand } from './commands/task.js';
+import { workflowsCommand } from './commands/workflows.js';
 import { VERSION } from './version.js';
 
 async function main(argv: string[]): Promise<number> {
@@ -86,6 +87,8 @@ async function main(argv: string[]): Promise<number> {
       return await sandboxCommand(args, { cwd });
     case 'task':
       return await taskCommand(args, { cwd });
+    case 'workflows':
+      return workflowsCommand(args);
     default:
       stderr.write(`未知命令: ${args.command}\n\n`);
       printHelp();
@@ -104,9 +107,10 @@ function printHelp(): void {
       '  connect            交互式连接模型（写入 ~/.forgex/config.json + 持久化 API Key）',
       '  chat [--plain] [--session <id>] [--config <path>] [--mode <模式>] [--plan]',
       '      进入交互式会话（TTY 下使用 Ink TUI，管道/--plain 使用纯文本）',
-      '  run "<任务>" [--json] [--yes] [--session <id>] [--config <path>] [--mode <模式>] [--plan] [--worktree]',
+      '  run "<任务>" [--json] [--yes] [--session <id>] [--config <path>] [--mode <模式>] [--plan] [--worktree] [--workflow <id>] [--requirements]',
       '      执行单次任务；支持从标准输入读取任务内容',
       '      --worktree  在独立 Git worktree + 分支中执行，产物可审阅（默认仍为原地执行）',
+      '      --workflow  将内置工作流阶段作为计划提示；--requirements 输出验收草案并记录需求追踪',
       '  doctor [--full] [--config <path>] [--mode <模式>]',
       '      检查 Node、工作区、数据库、rg/git、系统诊断能力',
       '  tools',
@@ -123,6 +127,7 @@ function printHelp(): void {
       '      resume 安全恢复（只有未开始步骤会自动调度，副作用未知的步骤必须先 reconcile）',
       '  sessions [--limit <n>] | sessions fork <sessionId> [--at <messageEventId>]',
       '      查看 JSONL 会话或从某条消息分叉继续',
+      '  workflows [<id>]  查看内置工作流；run 可用 --workflow <id> 参考其规划阶段',
       '',
       '通用选项：',
       '  --mode <模式>      权限模式：readonly | standard | trusted | yolo，优先级高于配置文件与环境变量',

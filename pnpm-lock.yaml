@@ -35,6 +35,9 @@ importers:
       '@forgex/models':
         specifier: workspace:*
         version: link:../../packages/models
+      '@forgex/requirement-engine':
+        specifier: workspace:*
+        version: link:../../packages/requirement-engine
       '@forgex/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
@@ -47,6 +50,9 @@ importers:
       '@forgex/tools':
         specifier: workspace:*
         version: link:../../packages/tools
+      '@forgex/workflows':
+        specifier: workspace:*
+        version: link:../../packages/workflows
       ink:
         specifier: 5.2.1
         version: 5.2.1(@types/react@18.3.12)(react@18.3.1)

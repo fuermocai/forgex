@@ -24,6 +24,7 @@ const VALUE_FLAGS = new Set([
   'prompt',
   // `--resume <runId>`：从中断的任务恢复（v0.5.7，安全诊断通过才继续）
   'resume',
+  'workflow',
   // task reconcile 用（v0.5.7）：目标步骤与备注
   'step',
   'note',
@@ -44,6 +45,7 @@ const BOOLEAN_FLAGS = new Set([
   'plan',
   // `--worktree`：把编码任务放进独立 Git worktree + 分支执行，产物可审阅（v0.5.6）
   'worktree',
+  'requirements',
   // task reconcile 用（v0.5.7 中断恢复）
   'confirm-done',
   'confirm-retry',

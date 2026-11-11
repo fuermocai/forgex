@@ -55,6 +55,7 @@ export class TaskPlanGeneratorError extends ForgeError {}
 export interface GeneratePlanOptions {
   minSteps?: number;
   signal?: AbortSignal;
+  workflowGuidance?: string;
 }
 
 export interface GeneratePlanResult {
@@ -87,7 +88,10 @@ export class TaskPlanGenerator {
     const response = await this.provider.chat({
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `${PLAN_PROMPT}\n\n用户请求:\n${userPrompt}` },
+        {
+          role: 'user',
+          content: `${PLAN_PROMPT}${options.workflowGuidance ? `\n\n工作流参考（只作为相关阶段的规划提示）:\n${options.workflowGuidance}` : ''}\n\n用户请求:\n${userPrompt}`,
+        },
       ],
       // 不传 tools → 模型看不到任何工具定义 → 强制纯文本/JSON 输出
       temperature: 0,

@@ -45,8 +45,9 @@
  */
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout, stderr } from 'node:process';
-import { ForgeError, createLogger, type Logger } from '@forgex/shared';
+import { ForgeError, JsonlEventStore, createLogger, type Logger } from '@forgex/shared';
 import { createProvider } from '@forgex/models';
+import { RequirementTraceStore } from '@forgex/requirement-engine';
 import { PlanManager, StepExecutor, TaskPlanner, type CheckpointRecord, type PlanManagerOptions, type StepExecResult, type TaskPlan } from '@forgex/core';
 import type { ApprovalHandler } from '@forgex/security';
 import { flagBool, flagString, type ParsedArgs } from '../args.js';
@@ -54,6 +55,8 @@ import { loadConfig } from '../config/load-config.js';
 import { modelSetupHint } from '../config/setup-hint.js';
 import { createRuntime, type ForgeRuntime } from '../runtime/create-runtime.js';
 import { TaskPlanGenerator, TaskPlanGeneratorError } from '../task-run/task-plan-generator.js';
+import { getWorkflow } from '../task-run/workflow-catalog.js';
+import { createRequirementReport, type RequirementReport } from '../task-run/requirement-report.js';
 import { ProductionQualityGate } from '../task-run/production-quality-gate.js';
 import { TaskRunStore, type TaskRunStatus } from '../task-run/task-run-store.js';
 import { analyzeTaskRun, assertResumable, verifyWorktreeForResume } from '../task-run/recovery.js';
@@ -83,8 +86,17 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
   const autoApprove = flagBool(args.flags, 'yes');
   const planOnly = flagBool(args.flags, 'plan');
   const useWorktree = flagBool(args.flags, 'worktree');
-  if (resumeRunId && (useWorktree || planOnly)) {
-    throw new ForgeError('CONFIG_INVALID', '--resume 不能与 --worktree / --plan 组合：worktree 沿用中断前的记录，不做新创建');
+  const workflowId = flagString(args.flags, 'workflow');
+  const useRequirements = flagBool(args.flags, 'requirements');
+  const workflow = workflowId ? getWorkflow(workflowId) : undefined;
+  if (workflowId && !workflow) {
+    throw new ForgeError('CONFIG_INVALID', `没有找到工作流 ${workflowId}；运行 forgex workflows 查看可用项`);
+  }
+  const workflowGuidance = workflow
+    ? `${workflow.name}:\n${workflow.nodes.map((node, index) => `${index + 1}. ${node.name}: ${node.description}`).join('\n')}`
+    : undefined;
+  if (resumeRunId && (useWorktree || planOnly || workflowId || useRequirements)) {
+    throw new ForgeError('CONFIG_INVALID', '--resume 不能与 --worktree / --plan / --workflow / --requirements 组合：恢复任务沿用中断前的计划和记录');
   }
   const interactive = Boolean(stdin.isTTY) && !json;
   const rl = interactive ? createInterface({ input: stdin, output: stderr, terminal: true }) : null;
@@ -115,6 +127,12 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
   const taskStartedAt = Date.now();
   let priorDurationMs = 0;
   let taskMetrics = { toolCalls: 0, modelCalls: 0, totalTokens: 0 };
+  let requirementReport: RequirementReport | undefined;
+  let requirementTraceId: string | undefined;
+  const updateRequirementTrace = (status: 'in-progress' | 'implemented' | 'abandoned'): void => {
+    if (!requirementTraceId) return;
+    new RequirementTraceStore(new JsonlEventStore(taskDbPath)).updateStatus(requirementTraceId, status);
+  };
   const abort = new AbortController();
 
   const interrupt = (signal: string) => {
@@ -261,7 +279,10 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
       const generator = new TaskPlanGenerator(createProvider(loaded.config.model, { logger }), planManager);
 
       try {
-        const { plan: generatedPlan, adjustments, modelCallCount, tokenUsage } = await generator.generate(prompt, { signal: abort.signal });
+        const { plan: generatedPlan, adjustments, modelCallCount, tokenUsage } = await generator.generate(prompt, {
+          signal: abort.signal,
+          ...(workflowGuidance ? { workflowGuidance } : {}),
+        });
         if (abort.signal.aborted) throw abort.signal.reason;
         plan = generatedPlan;
         taskMetrics.modelCalls += modelCallCount;
@@ -302,10 +323,19 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
       emitText(stderr, json, `  ${i + 1}. [${s.status}] ${s.description}${deps} (risk=${s.risk_level})\n`);
     }
 
+    if (useRequirements) {
+      requirementReport = createRequirementReport(prompt, plan);
+      emitText(stderr, json, `\n需求验收草案（${requirementReport.requirement.acceptanceCriteria.length} 项，均待用户确认）：\n`);
+      for (const [index, criterion] of requirementReport.requirement.acceptanceCriteria.entries()) {
+        emitText(stderr, json, `  ${index + 1}. ${criterion.description} [${criterion.verificationMethod}]\n`);
+      }
+      emitText(stderr, json, `  就绪分析：${requirementReport.analysis.ready ? 'ready' : requirementReport.analysis.reasons.join('；')}\n`);
+    }
+
     if (planOnly) {
       // --plan 只读：不建 worktree（没有产物需要审阅）
       emitText(stderr, json, `\n✓ 计划生成完毕（--plan 模式：不执行任何写操作）\n`);
-      emitResult({ plan }, json, 'planned', 0);
+      emitResult({ plan, ...(workflow ? { workflowId: workflow.id } : {}), ...(requirementReport ? { requirementReport } : {}) }, json, 'planned', 0);
       return 0;
     }
 
@@ -364,6 +394,14 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
         metrics: taskMetrics,
       });
 
+      if (requirementReport) {
+        const traceStore = new RequirementTraceStore(new JsonlEventStore(taskDbPath));
+        const trace = traceStore.init(requirementReport.requirement);
+        requirementTraceId = trace.traceId;
+        traceStore.bindWorkflowRun(trace.traceId, runId);
+        traceStore.updateStatus(trace.traceId, 'in-progress');
+      }
+
       if (useWorktree) {
         try {
           worktree = await createReviewWorktree({
@@ -389,6 +427,7 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           // fail closed：不回退到原目录继续执行
+          updateRequirementTrace('abandoned');
           store.updateRun(runId, {
             status: 'failed',
             exit_code: 1,
@@ -497,6 +536,7 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
           : execResult.truncated ? '预算耗尽，计划未完整执行'
           : `计划状态为 ${execResult.plan_status}，跳过质量门禁`,
       });
+      updateRequirementTrace(status === 'aborted' ? 'abandoned' : 'implemented');
       emitResult(
         {
           runId,
@@ -526,6 +566,7 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
     taskMetrics.toolCalls += gateResult.run_count;
 
     if (abort.signal.aborted) {
+      updateRequirementTrace('abandoned');
       store.updateRun(runId, {
         status: 'aborted', duration_ms: priorDurationMs + Date.now() - taskStartedAt, exit_code: 1,
         tool_calls: taskMetrics.toolCalls, model_calls: taskMetrics.modelCalls, total_tokens: taskMetrics.totalTokens,
@@ -550,6 +591,18 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
       details_json: JSON.stringify(gateResult.stages),
       final_message: gateResult.verdict,
     });
+
+    if (requirementTraceId) {
+      const traceStore = new RequirementTraceStore(new JsonlEventStore(taskDbPath));
+      for (const stage of gateResult.stages) {
+        if (!stage.note) traceStore.addTest(requirementTraceId, `${stage.name}: ${stage.command}`);
+      }
+      if (gateResult.verdict === 'passed') {
+        traceStore.markDelivered(requirementTraceId, '任务计划完成，生产质量门禁通过');
+      } else {
+        updateRequirementTrace('implemented');
+      }
+    }
 
     // ==============================================================
     // [6] 最终状态
@@ -578,6 +631,8 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
         gateResult,
         finalStatus,
         exitCode,
+        ...(workflow ? { workflowId: workflow.id } : {}),
+        ...(requirementReport ? { requirementReport } : {}),
         ...(worktree ? { worktree: worktreeInfo(worktree) } : {}),
       },
       json,
@@ -587,6 +642,7 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
     return exitCode;
 
   } catch (err) {
+    updateRequirementTrace('abandoned');
     if (aborted) {
       if (runId) {
         try {
@@ -658,6 +714,8 @@ interface EmitPayload {
   resumeError?: string;
   analysis?: unknown;
   isolation?: 'in_place' | 'worktree';
+  workflowId?: string;
+  requirementReport?: RequirementReport;
 }
 
 function worktreeInfo(worktree: ReviewWorktreeRecord): NonNullable<EmitPayload['worktree']> {

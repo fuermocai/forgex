@@ -67,6 +67,9 @@ forgex run "检查端口 8080"       # 单次任务
 forgex run --json "..."         # JSON 输出
 forgex run "修复空指针" --worktree  # 在独立 Git worktree + 分支中执行，产物可审阅
 forgex task list|show|diff|clean  # 审阅/清理 worktree 任务产物
+forgex workflows                 # 列出内置工作流
+forgex workflows feature-dev     # 查看工作流阶段
+forgex run "实现功能" --workflow feature-dev --requirements
 forgex sandbox                  # 查看沙箱能力（区分工作区隔离 / 资源限制 / OS 级隔离）
 forgex doctor                   # 环境自检
 forgex tools                    # 列出内置工具
@@ -80,6 +83,7 @@ forgex config                   # 查看最终生效配置（Key 脱敏）
 门禁命令，不能当作验证通过。
 `--worktree` 只隔离工作区与改动（独立 worktree + 分支，产物用 `forgex task diff` 审阅），
 仓库有未提交改动时会直接拒绝，不会 stash/reset。
+`forgex workflows [<id>]` 可查看内置工作流。`run --workflow <id>` 会把所选工作流阶段作为任务规划提示；任务仍由现有计划执行器和质量门禁负责。`run --requirements` 根据计划生成需求分析与验收标准草案，并将追踪记录写入事件日志；模型生成的验收标准全部标记为未批准，不会伪装成用户确认，也不会阻止当前任务执行。
 
 ## 配置
 
