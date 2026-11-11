@@ -37,7 +37,7 @@ const inputSchema = z.object({
   program: z
     .string()
     .min(1)
-    .describe('可执行程序名或绝对路径，例如 git、pnpm、node；禁止传递 shell 命令字符串'),
+    .describe('可执行程序名或绝对路径，例如 git、pnpm、node；Windows 会自动解析 PATH 中的 .cmd/.bat shim；禁止传递 shell 命令字符串'),
   args: z.array(z.string()).default([]).describe('参数数组，每个参数单独一项，不做 shell 展开'),
   cwd: z.string().optional().describe('工作目录（相对工作区），默认当前目录'),
   timeoutMs: z

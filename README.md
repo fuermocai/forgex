@@ -106,6 +106,8 @@ cargo build --release --manifest-path crates/executor/Cargo.toml
 
 Agent 默认持续运行，直到模型结束或用户取消。需要限制模型请求次数时，可在 `agent` 中显式设置 `"maxIterations": 20`，或设置环境变量 `FORGEX_MAX_ITERATIONS=20`；达到该上限会以未完成状态返回。
 
+命令工具接收程序名和参数数组，不接受整段 shell 命令。Windows 下可直接调用 `pnpm`、`npm` 等命令，ForgeX 会在 PATH 中没有原生可执行文件时解析对应的 `.cmd` / `.bat` 包装器；解释器内联代码（如 `node -p`、`node -e`）仍会被安全策略拒绝，请将脚本保存为工作区文件后运行。
+
 启动：
 
 ```powershell

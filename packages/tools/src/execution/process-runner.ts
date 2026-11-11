@@ -75,6 +75,10 @@ interface Launch {
  *   - 含 cmd 元字符（& | < > ^ % " ! 等）的参数直接拒绝，避免二次解析注入。
  */
 function resolveLaunch(program: string, args: readonly string[]): Launch {
+  if (process.platform === 'win32' && !WINDOWS_SHIM.test(program) && !/[\\/.]/.test(program)) {
+    const shimPath = findWindowsShim(program);
+    if (shimPath) return resolveLaunch(shimPath, args);
+  }
   if (process.platform !== 'win32' || !WINDOWS_SHIM.test(program)) {
     return { command: program, args: [...args], windowsVerbatimArguments: false, viaWindowsShim: false };
   }
@@ -131,6 +135,29 @@ function resolveWindowsShim(program: string): string {
     }
   }
   throw new ForgeError('TOOL_FAILED', `找不到可执行程序: ${program}`, { details: { program } });
+}
+
+/** Resolves a bare command to a Windows script shim when no native executable exists. */
+function findWindowsShim(program: string): string | null {
+  const pathValue = process.env.PATH ?? process.env.Path ?? '';
+  const dirs = pathValue.split(';').filter(Boolean);
+  const nativeExtensions = (process.env.PATHEXT ?? '.COM;.EXE').split(';')
+    .map((ext) => ext.trim().toLowerCase())
+    .filter((ext) => ext === '.com' || ext === '.exe');
+
+  for (const dir of dirs) {
+    for (const ext of nativeExtensions) {
+      if (existsSync(join(dir, `${program}${ext}`))) return null;
+    }
+  }
+
+  for (const dir of dirs) {
+    for (const ext of ['.cmd', '.bat']) {
+      const candidate = join(dir, `${program}${ext}`);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
 }
 
 export function runProcess(spec: ProcessSpec): Promise<ProcessResult> {

@@ -138,7 +138,7 @@ export class CommandGuard {
       if (hit) {
         return {
           decision: 'deny',
-          reason: `禁止解释器内联代码执行（${base} ${hit}）；请把脚本写入工作区后按文件执行`,
+          reason: `禁止解释器内联代码执行（${base} ${hit}）；请将脚本保存到工作区，再用对应解释器和脚本文件运行`,
           rule: 'inline_code_execution',
         };
       }
