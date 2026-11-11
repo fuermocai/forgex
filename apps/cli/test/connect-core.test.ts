@@ -71,7 +71,7 @@ describe('配置读写', () => {
     const existing = {
       model: { baseUrl: 'http://old', model: 'old', contextWindow: 1024, maxOutputTokens: 256, stream: true },
       security: { mode: 'readonly' },
-      session: { dbPath: 'x.db' },
+      session: { dbPath: 'events.jsonl' },
       agent: { maxIterations: 5, maxConcurrency: 2 },
     };
     const next = buildConfig(existing, {
@@ -88,7 +88,7 @@ describe('配置读写', () => {
       contextWindow: 1_000_000,
     });
     expect(next.security).toEqual({ mode: 'readonly' });
-    expect(next.session).toEqual({ dbPath: 'x.db' });
+    expect(next.session).toEqual({ dbPath: 'events.jsonl' });
   });
 
   it('readExistingConfig 对缺失文件返回默认值', () => {
@@ -308,7 +308,7 @@ describe('saveConnectionConfig', () => {
         maxOutputTokens: 8192,
       });
       expect(written.security.mode).toBe('standard');
-      expect(written.session.dbPath).toBe(join('.forgex', 'sessions.db'));
+      expect(written.session.dbPath).toBe(join('.forgex', 'events.jsonl'));
       expect(written.agent.maxIterations).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });

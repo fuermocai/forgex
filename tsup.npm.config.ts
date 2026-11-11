@@ -17,8 +17,7 @@ export default defineConfig({
   sourcemap: false,
   clean: true,
   minify: false,
-  // tsup 默认会去掉 `node:` 前缀；这会把 `node:sqlite` 变成不存在的
-  // 裸包 `sqlite`。发布包必须保留前缀。
+  // Node built-in imports must keep their `node:` protocol in published bundles.
   removeNodeProtocol: false,
   noExternal: [/^@forgex\//, 'zod'],
   external: ['ink', 'react', 'ssh2'],

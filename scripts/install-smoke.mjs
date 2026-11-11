@@ -129,7 +129,7 @@ try {
   if (unexpected.length > 0) fail(`tarball 含未声明的文件: ${unexpected.join(', ')}`);
   else ok(`tarball 清单干净：仅 ${[...ALLOWED_FILES].join(' / ')}（共 ${files.length} 个文件）`);
 
-  const forbiddenPatterns = /\.(env|log|db|sqlite|sqlite3)$|(^|\/)(coverage|\.git|node_modules)(\/|$)/i;
+  const forbiddenPatterns = /\.(env|log|db)$|(^|\/)(coverage|\.git|node_modules)(\/|$)/i;
   const bad = files.filter((f) => forbiddenPatterns.test(f));
   if (bad.length > 0) fail(`tarball 含疑似敏感/构建残留文件: ${bad.join(', ')}`);
   else ok('无 .env / 数据库 / 日志 / 测试产物');

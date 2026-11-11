@@ -89,7 +89,7 @@ export const MAX_RECALL_LIMIT = 100;
 /**
  * 一条记忆条目。
  *
- * 时间字段统一 ISO 8601 字符串（与 SessionStore 一致，方便 SQLite 排序）。
+ * 时间字段统一 ISO 8601 字符串（与 SessionStore 一致，便于稳定排序）。
  */
 export interface MemoryEntry {
   /** 记忆唯一 ID */

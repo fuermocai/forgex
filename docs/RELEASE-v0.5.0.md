@@ -60,7 +60,7 @@ v0.4.0                        v0.5.0 (新增/增强)
     ▼                                        │
 ┌──────────────────┐                         │
 │ RequirementTrace │◀────────────────────────┘
-│ Store (SQLite)   │   追溯链：workflowRunId 预留
+│ Store (JSONL)    │   追溯链：workflowRunId 预留
 └──────────────────┘   关联 Phase 2 工作流
 ```
 
@@ -495,7 +495,7 @@ v0.4.0 全部 693 个测试在 v0.5.0 下继续通过。
 | 版本 | 主题 | 方向 |
 | --- | --- | --- |
 | v0.5.1 | 生产适配器 | `RequirementModelInterface` → 真实 prompt 模板 + `createProvider()` 注入 |
-| v0.5.2 | SQLite 持久化 | `RequirementTraceStore` + `EngineeringKnowledgeStore` 接 SQLite WAL |
+| v0.5.2 | 持久化适配 | `RequirementTraceStore` + `EngineeringKnowledgeStore` 接入 JSONL 事件流 |
 | v0.6.0 | 远程并行 | Orchestrator 跨工作区 + 远程 Agent 实例 |
 | v0.7.0 | 企业特性 | SSO / RBAC / 多租户 / 审计合规报告 |
 

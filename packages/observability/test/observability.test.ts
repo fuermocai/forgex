@@ -9,7 +9,7 @@
  *   5. 执行报告生成。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { SpanRecorder } from '../src/tracing/span-recorder.js';
 import { TraceManager } from '../src/tracing/trace-manager.js';
 import { MetricsCollector } from '../src/metrics/metrics-collector.js';
@@ -125,11 +125,11 @@ describe('MetricsCollector', () => {
 });
 
 describe('AuditEventStore', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let store: AuditEventStore;
 
   beforeEach(() => {
-    db = new DatabaseSync(':memory:');
+    db = new JsonlEventStore(':memory:');
     store = new AuditEventStore(db);
   });
 
@@ -172,7 +172,7 @@ describe('ExecutionReporter', () => {
     const recorder = new SpanRecorder();
     const tm = new TraceManager(recorder);
     const mc = new MetricsCollector();
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const audit = new AuditEventStore(db);
     const reporter = new ExecutionReporter(tm, mc, audit);
 

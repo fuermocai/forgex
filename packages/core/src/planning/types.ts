@@ -8,7 +8,7 @@
  * 设计原则：
  *   1. 纯类型文件，零外部运行时依赖（只 import @forgex/shared 的 uuid 工具）；
  *   2. 所有字段可 JSON 序列化（无 Date 对象、无 Map、无 undefined），
- *      便于 CheckpointManager 用 node:sqlite 直接持久化；
+ *      便于 CheckpointManager 直接追加到 JSONL 事件流；
  *   3. TaskStatus 提供显式状态机转移表 + 验证函数，后续模块统一调用，
  *      避免各处手写 if/switch 产生不一致；
  *   4. 不引入 zod schema——本层是领域模型，校验留给 PlanManager / StepExecutor
@@ -250,7 +250,7 @@ export interface TaskPlan {
 }
 
 /* ------------------------------------------------------------------ */
-/* CheckpointRecord（可 JSON 序列化，CheckpointManager 直接落 SQLite）  */
+/* CheckpointRecord（可 JSON 序列化，CheckpointManager 追加到事件流）  */
 /* ------------------------------------------------------------------ */
 
 /**

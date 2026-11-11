@@ -1,155 +1,78 @@
-/**
- * ApprovalStore：审批记录持久化（v0.4.0 Phase 3）。
- *
- * 存储策略（复用 node:sqlite 模式）：
- *   - 整个 ApprovalRecord 存单个 JSON blob 列（payload TEXT）；
- *   - 表结构：approvals(id TEXT PK, status TEXT, scope_hash TEXT, payload TEXT, created_at TEXT)；
- *   - 额外索引 scope_hash 用于按范围查询。
- *
- * 支持：create、get、listByScope、updateStatus、expireOutdated。
- */
-import { DatabaseSync } from 'node:sqlite';
-import { ForgeError } from '@forgex/shared';
+/** Append-only JSONL persistence for scoped approval records. */
+import { ForgeError, JsonlEventStore } from '@forgex/shared';
 import type { ApprovalRecord, ApprovalStatus } from '../types.js';
 import { approvalNowIso } from '../types.js';
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS approvals (
-  id TEXT PRIMARY KEY,
-  status TEXT NOT NULL,
-  scope_hash TEXT NOT NULL,
-  operation TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_approvals_scope_hash ON approvals(scope_hash);
-CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
-`;
-
 export class ApprovalStore {
-  private readonly db: DatabaseSync;
+  private readonly events: JsonlEventStore;
 
-  constructor(db: DatabaseSync) {
-    this.db = db;
-    try {
-      this.db.exec('PRAGMA journal_mode = WAL');
-      this.db.exec('PRAGMA busy_timeout = 3000');
-    } catch {
-      // WAL 设置失败不阻塞
-    }
-    try {
-      this.db.exec(SCHEMA);
-    } catch (err) {
-      throw new ForgeError('INTERNAL', '无法初始化 approvals 表', { cause: err });
-    }
+  constructor(events: JsonlEventStore) {
+    this.events = events;
   }
 
-  /** 创建审批记录 */
+  /** Creates or replaces an approval record. */
   create(record: ApprovalRecord): void {
-    try {
-      const payload = JSON.stringify(record);
-      this.db
-        .prepare(
-          `INSERT OR REPLACE INTO approvals (id, status, scope_hash, operation, payload, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          record.id,
-          record.status,
-          record.scope.paramHash,
-          record.operation,
-          payload,
-          record.createdAt,
-        );
-    } catch (err) {
-      throw new ForgeError('INTERNAL', `创建审批记录失败: ${record.id}`, {
-        cause: err,
-        details: { approvalId: record.id },
-      });
-    }
+    this.append('approval.saved', record);
   }
 
-  /** 获取审批记录 */
+  /** Returns one approval record, if present. */
   get(id: string): ApprovalRecord | null {
-    try {
-      const row = this.db
-        .prepare('SELECT payload FROM approvals WHERE id = ?')
-        .get(id) as { payload: string } | undefined;
-      if (!row) return null;
-      return JSON.parse(row.payload) as ApprovalRecord;
-    } catch (err) {
-      throw new ForgeError('INTERNAL', `读取审批记录失败: ${id}`, {
-        cause: err,
-        details: { approvalId: id },
-      });
-    }
+    return this.latestRecords().get(id) ?? null;
   }
 
-  /** 按 scope hash 查询审批记录 */
+  /** Returns records that share a scope hash, newest first. */
   listByScope(scopeHash: string): ApprovalRecord[] {
-    try {
-      const rows = this.db
-        .prepare('SELECT payload FROM approvals WHERE scope_hash = ? ORDER BY created_at DESC')
-        .all(scopeHash) as Array<{ payload: string }>;
-      return rows.map((r) => JSON.parse(r.payload) as ApprovalRecord);
-    } catch (err) {
-      throw new ForgeError('INTERNAL', '按范围查询审批记录失败', {
-        cause: err,
-        details: { scopeHash },
-      });
-    }
+    return [...this.latestRecords().values()]
+      .filter((record) => record.scope.paramHash === scopeHash)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
-  /** 更新审批状态 */
+  /** Updates the state of an existing approval record. */
   updateStatus(id: string, status: ApprovalStatus, approver?: string, denialReason?: string): void {
     const record = this.get(id);
     if (!record) {
-      throw new ForgeError('APPROVAL_REVOKED', `审批记录不存在: ${id}`, {
-        details: { approvalId: id },
-      });
+      throw new ForgeError('APPROVAL_REVOKED', `审批记录不存在: ${id}`, { details: { approvalId: id } });
     }
     record.status = status;
     record.decidedAt = approvalNowIso();
     if (approver) record.approver = approver;
     if (denialReason) record.denialReason = denialReason;
-
-    try {
-      const payload = JSON.stringify(record);
-      this.db
-        .prepare('UPDATE approvals SET status = ?, payload = ? WHERE id = ?')
-        .run(status, payload, id);
-    } catch (err) {
-      throw new ForgeError('INTERNAL', `更新审批状态失败: ${id}`, {
-        cause: err,
-        details: { approvalId: id },
-      });
-    }
+    this.append('approval.updated', record);
   }
 
-  /** 将过期的审批标记为 expired */
+  /** Marks pending and approved records past their expiry as expired. */
   expireOutdated(): number {
     const now = approvalNowIso();
-    const rows = this.db
-      .prepare("SELECT payload FROM approvals WHERE status IN ('pending', 'approved')")
-      .all() as Array<{ payload: string }>;
-
     let expired = 0;
-    for (const row of rows) {
-      const record = JSON.parse(row.payload) as ApprovalRecord;
-      if (record.scope.expiresAt < now) {
+    for (const record of this.latestRecords().values()) {
+      if ((record.status === 'pending' || record.status === 'approved') && record.scope.expiresAt < now) {
         this.updateStatus(record.id, 'expired');
-        expired++;
+        expired += 1;
       }
     }
     return expired;
   }
 
-  /** 检查指定 scope 是否有有效的（approved 且未过期）审批 */
+  /** Checks for an approved, unexpired record with the given scope hash. */
   hasValidApproval(scopeHash: string): boolean {
-    const records = this.listByScope(scopeHash);
     const now = approvalNowIso();
-    return records.some(
-      (r) => r.status === 'approved' && r.scope.expiresAt > now,
-    );
+    return this.listByScope(scopeHash).some((record) => record.status === 'approved' && record.scope.expiresAt > now);
+  }
+
+  private append(type: string, record: ApprovalRecord): void {
+    const parent = this.events.readAll().findLast((event) => event.data.approvalId === record.id);
+    this.events.append(type, { approvalId: record.id, record }, parent?.id ?? null);
+  }
+
+  private latestRecords(): Map<string, ApprovalRecord> {
+    const records = new Map<string, ApprovalRecord>();
+    for (const event of this.events.readAll()) {
+      if ((event.type !== 'approval.saved' && event.type !== 'approval.updated') || typeof event.data.approvalId !== 'string') continue;
+      const record = event.data.record;
+      if (record && typeof record === 'object' && !Array.isArray(record)) {
+        records.set(event.data.approvalId, JSON.parse(JSON.stringify(record)) as ApprovalRecord);
+      }
+    }
+    return records;
   }
 }

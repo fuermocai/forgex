@@ -2,7 +2,7 @@
 
 ## 1. 环境要求
 
-- Node.js >= 22（使用 `node:sqlite`、`AbortSignal.any`、原生 fetch）
+- Node.js >= 22（使用 `AbortSignal.any`、原生 fetch）
 - pnpm >= 9（仓库使用 pnpm workspace）
 - Rust stable（仅构建 `crates/executor` 时需要）
 - ripgrep（可选；缺失时 `grep_search` 自动降级为纯 Node 搜索）
@@ -147,8 +147,6 @@ node_modules\.pnpm\ssh2@<version>\node_modules\ssh2\lib\protocol\crypto\build\Re
 
 不在 `forgex.config.json` 里配置 `security.remoteHosts`（默认空），`ssh_inspect` 工具不会注册，ssh2 依赖不会被 import。此时 forgeX 正常运行所有本机诊断能力，只是远程 SSH 禁用。
 
-注意：`node:sqlite` 首次使用会打印一行 ExperimentalWarning，可通过 `NODE_NO_WARNINGS=1` 抑制（不建议在生产盲目屏蔽所有警告）。
-
 ## 8. Rust 执行器
 
 构建：
@@ -198,7 +196,7 @@ Benchmark 使用本地假模型 + 真实工具：
 | --- | --- | --- | --- |
 | zod | 工具参数校验 + JSON Schema 生成 | MIT | 纯运行时校验，无网络行为 |
 | ink / react | TUI 渲染 | MIT | 仅 CLI 层使用，不进入 Agent Runtime |
-| `node:sqlite` | 会话/审计/指标持久化 | Node 内置 | 实验特性，需 Node 22+ |
+| JSONL event log | 会话/审计/指标/任务持久化 | Node 内置文件 API | 追加写入；索引可从事件重建 |
 | ripgrep | 代码搜索 | MIT / Unlicense | 外部二进制，缺失时降级 |
 | ssh2 | SSH2 协议实现（v0.2.0 远程诊断） | MIT | **native addon**，需预编译或在目标机执行 `pnpm approve-builds ssh2` |
 | serde / serde_json | Rust 执行器协议 | MIT / Apache-2.0 | 仅 executor crate |
@@ -208,10 +206,10 @@ Benchmark 使用本地假模型 + 真实工具：
 
 ## 11. 排查
 
-- `forgex doctor`：优先运行，检查 Node、配置、工作区、数据库、rg/git、诊断能力。
+- `forgex doctor`：优先运行，检查 Node、配置、工作区、事件日志、rg/git、诊断能力。
 - `forgex config`：确认配置来源与最终值（Key 脱敏）。
 - 模型请求失败：检查 `baseUrl` 是否包含 `/v1`、网关是否要求额外 header、是否禁用 SSE。
 - 工具总是被拒绝：检查 `mode`、`requireApprovalForWrite/Execute`、是否处于非交互环境（默认拒绝）。
 - 端口诊断为 `found=false`：确认服务是否真的监听、是否绑定到其他地址/协议。
-- SQLite 打不开：确认 `FORGEX_DB_PATH` 目录存在且可写。
+- 事件日志不可读：确认 `FORGEX_DB_PATH`（默认 `.forgex/events.jsonl`）指向的文件及其目录可读写。
 - Windows 下中文乱码：源文件使用 UTF-8；诊断工具对 UTF-16LE 日志做了兼容。

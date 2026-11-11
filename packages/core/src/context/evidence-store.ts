@@ -4,19 +4,16 @@
  * 解决什么问题：
  *   工具输出（长日志、大 diff、整文件内容）是上下文窗口的最大消耗者。
  *   传统做法是超限后直接截断——信息永久丢失，模型无法回溯。
- *   本模块把大文本从消息流中剥离，存入本地 SQLite，
+ *   本模块把大文本从消息流中剥离，存入本地 JSONL 事件日志，
  *   消息里只留一个紧凑引用（evidence id + 预览），需要时可按 id 取回原文。
  *
  * 设计原则：
- *   1. 全离线：node:sqlite，零网络依赖（与 SessionStore/MemoryStore 一致）；
+ *   1. 全离线：追加写入 JSONL，零网络依赖；
  *   2. 审计友好：证据落库后不可变（不提供 update），删除走显式 delete；
  *   3. 引用格式是"模型可读的文本"，不是魔法 ID——模型看到引用就知道
  *      原始内容曾经存在、有多大、预览是什么。
  */
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { ForgeError, uuid } from '@forgex/shared';
+import { ForgeError, JsonlEventStore, uuid } from '@forgex/shared';
 
 /** 证据类别（影响保留策略与审计检索） */
 export const EVIDENCE_KINDS = ['tool_output', 'file_content', 'log_excerpt', 'diff', 'other'] as const;
@@ -71,21 +68,6 @@ export function renderEvidencePlaceholder(ref: EvidenceRef): string {
   );
 }
 
-type Row = Record<string, unknown>;
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS evidence (
-  id TEXT PRIMARY KEY,
-  session_id TEXT,
-  kind TEXT NOT NULL,
-  content TEXT NOT NULL,
-  byte_len INTEGER NOT NULL,
-  created_at TEXT NOT NULL,
-  metadata TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_evidence_session ON evidence(session_id, created_at);
-`;
-
 export interface PutEvidenceInput {
   kind: EvidenceKind;
   content: string;
@@ -95,20 +77,10 @@ export interface PutEvidenceInput {
 }
 
 export class EvidenceStore {
-  private readonly db: DatabaseSync;
+  private readonly events: JsonlEventStore;
 
   constructor(dbPath: string) {
-    if (dbPath !== ':memory:') {
-      mkdirSync(dirname(dbPath), { recursive: true });
-    }
-    try {
-      this.db = new DatabaseSync(dbPath);
-    } catch (err) {
-      throw new ForgeError('EVIDENCE_STORE_ERROR', `无法打开证据数据库: ${dbPath}`, { cause: err });
-    }
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA busy_timeout = 3000');
-    this.db.exec(SCHEMA);
+    this.events = new JsonlEventStore(dbPath);
   }
 
   /** 存入证据，返回引用（内容不可变，重复 put 生成新 id） */
@@ -122,23 +94,8 @@ export class EvidenceStore {
     const id = newEvidenceId();
     const byteLen = Buffer.byteLength(input.content, 'utf8');
     const now = new Date().toISOString();
-    try {
-      this.db
-        .prepare(
-          'INSERT INTO evidence (id, session_id, kind, content, byte_len, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(
-          id,
-          input.sessionId ?? null,
-          input.kind,
-          input.content,
-          byteLen,
-          now,
-          input.metadata ? JSON.stringify(input.metadata) : null,
-        );
-    } catch (err) {
-      throw new ForgeError('EVIDENCE_STORE_ERROR', '写入证据失败', { cause: err, details: { id } });
-    }
+    const parent = this.events.readAll().findLast((event) => event.type === 'evidence.put');
+    this.events.append('evidence.put', { id, sessionId: input.sessionId ?? null, kind: input.kind, content: input.content, byteLen, createdAt: now, metadata: input.metadata ?? null }, parent?.id ?? null);
     const ref: EvidenceRef = {
       id,
       kind: input.kind,
@@ -152,79 +109,75 @@ export class EvidenceStore {
 
   /** 按 ID 取完整记录；不存在返回 null */
   get(id: string): EvidenceRecord | null {
-    const row = this.db.prepare('SELECT * FROM evidence WHERE id = ?').get(id) as Row | undefined;
+    const row = this.readRecords().get(id);
     if (!row) return null;
     const record: EvidenceRecord = {
-      id: String(row.id),
-      kind: String(row.kind) as EvidenceKind,
-      byteLen: Number(row.byte_len),
-      preview: makePreview(String(row.content)),
-      createdAt: String(row.created_at),
-      content: String(row.content),
+      id,
+      kind: row.kind,
+      byteLen: row.byteLen,
+      preview: makePreview(row.content),
+      createdAt: row.createdAt,
+      content: row.content,
     };
-    if (row.session_id !== null) record.sessionId = String(row.session_id);
+    if (row.sessionId !== null) record.sessionId = row.sessionId;
     return record;
   }
 
   /** 按 ID 取引用（不读原文，校验存在性用） */
   getRef(id: string): EvidenceRef | null {
-    const row = this.db
-      .prepare('SELECT id, session_id, kind, byte_len, created_at, substr(content, 1, ?) AS head FROM evidence WHERE id = ?')
-      .get(PREVIEW_MAX_CHARS + 8, id) as Row | undefined;
+    const row = this.readRecords().get(id);
     if (!row) return null;
     const ref: EvidenceRef = {
-      id: String(row.id),
-      kind: String(row.kind) as EvidenceKind,
-      byteLen: Number(row.byte_len),
-      preview: makePreview(String(row.head ?? '')),
-      createdAt: String(row.created_at),
+      id,
+      kind: row.kind,
+      byteLen: row.byteLen,
+      preview: makePreview(row.content.slice(0, PREVIEW_MAX_CHARS + 8)),
+      createdAt: row.createdAt,
     };
-    if (row.session_id !== null) ref.sessionId = String(row.session_id);
+    if (row.sessionId !== null) ref.sessionId = row.sessionId;
     return ref;
   }
 
   /** 列出某个 session 的证据引用（按时间升序） */
   listBySession(sessionId: string, limit = 200): EvidenceRef[] {
-    const rows = this.db
-      .prepare(
-        'SELECT id, session_id, kind, byte_len, created_at, substr(content, 1, ?) AS head FROM evidence WHERE session_id = ? ORDER BY created_at ASC LIMIT ?',
-      )
-      .all(PREVIEW_MAX_CHARS + 8, sessionId, Math.max(1, limit)) as Row[];
-    return rows.map((row) => ({
-      id: String(row.id),
-      kind: String(row.kind) as EvidenceKind,
-      byteLen: Number(row.byte_len),
-      preview: makePreview(String(row.head ?? '')),
-      createdAt: String(row.created_at),
-      sessionId,
-    }));
+    return [...this.readRecords().values()].filter((row) => row.sessionId === sessionId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(0, Math.max(1, limit))
+      .map((row) => ({ id: row.id, kind: row.kind, byteLen: row.byteLen, preview: makePreview(row.content.slice(0, PREVIEW_MAX_CHARS + 8)), createdAt: row.createdAt, sessionId }));
   }
 
   /** 删除证据（会话清理用）；返回是否实际删除 */
   delete(id: string): boolean {
-    const result = this.db.prepare('DELETE FROM evidence WHERE id = ?').run(id);
-    return Number(result.changes) > 0;
+    if (!this.readRecords().has(id)) return false;
+    const parent = this.events.readAll().findLast((event) => event.data.evidenceId === id);
+    this.events.append('evidence.delete', { evidenceId: id }, parent?.id ?? null);
+    return true;
   }
 
   /** 清理某个 session 的全部证据；返回删除条数 */
   purgeSession(sessionId: string): number {
-    const result = this.db.prepare('DELETE FROM evidence WHERE session_id = ?').run(sessionId);
-    return Number(result.changes);
+    const ids = [...this.readRecords().values()].filter((record) => record.sessionId === sessionId).map((record) => record.id);
+    for (const id of ids) this.delete(id);
+    return ids.length;
   }
 
   /** 统计（监控/测试用） */
   count(sessionId?: string): number {
     if (sessionId !== undefined) {
-      const row = this.db
-        .prepare('SELECT COUNT(*) AS n FROM evidence WHERE session_id = ?')
-        .get(sessionId) as Row | undefined;
-      return row ? Number(row.n) : 0;
+      return [...this.readRecords().values()].filter((record) => record.sessionId === sessionId).length;
     }
-    const row = this.db.prepare('SELECT COUNT(*) AS n FROM evidence').get() as Row | undefined;
-    return row ? Number(row.n) : 0;
+    return this.readRecords().size;
   }
 
-  close(): void {
-    this.db.close();
+  close(): void { /* JSONL appends are synchronous and require no flush. */ }
+
+  private readRecords(): Map<string, { id: string; sessionId: string | null; kind: EvidenceKind; content: string; byteLen: number; createdAt: string }> {
+    const records = new Map<string, { id: string; sessionId: string | null; kind: EvidenceKind; content: string; byteLen: number; createdAt: string }>();
+    for (const event of this.events.readAll()) {
+      if (event.type === 'evidence.delete' && typeof event.data.evidenceId === 'string') records.delete(event.data.evidenceId);
+      if (event.type === 'evidence.put' && typeof event.data.id === 'string' && typeof event.data.content === 'string') {
+        records.set(event.data.id, event.data as unknown as { id: string; sessionId: string | null; kind: EvidenceKind; content: string; byteLen: number; createdAt: string });
+      }
+    }
+    return records;
   }
 }

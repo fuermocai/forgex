@@ -63,7 +63,7 @@ const SecuritySchema = z.object({
 });
 
 const SessionSchema = z.object({
-  dbPath: z.string().default(join('.forgex', 'sessions.db')),
+  dbPath: z.string().default(join('.forgex', 'events.jsonl')),
 });
 
 const AgentSchema = z.object({
@@ -272,7 +272,7 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
     resolveFrom(cwd, root),
   );
   const auditLogPath = resolveFrom(cwd, value.security.auditLogPath ?? join('.forgex', 'audit.jsonl'));
-  const dbPath = resolveFrom(cwd, value.session.dbPath);
+  const dbPath = resolveEventLogPath(cwd, value.session.dbPath);
 
   // v0.2.0：解析 remoteHosts（privateKeyPath 统一为绝对路径）
   const remoteHosts: RemoteHostConfig[] = value.security.remoteHosts.map((host) => ({
@@ -501,6 +501,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function resolveFrom(cwd: string, target: string): string {
   const expanded = expandHome(target);
   return isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
+}
+
+function resolveEventLogPath(cwd: string, target: string): string {
+  const resolved = resolveFrom(cwd, target);
+  return resolved.toLowerCase().endsWith('.db') ? `${resolved.slice(0, -3)}.jsonl` : resolved;
 }
 
 /**

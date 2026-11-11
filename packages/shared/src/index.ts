@@ -8,3 +8,4 @@ export * from './utils/diff.js';
 export * from './utils/id.js';
 export * from './utils/protocol.js';
 export * from './utils/zod-schema.js';
+export * from './utils/jsonl-event-store.js';

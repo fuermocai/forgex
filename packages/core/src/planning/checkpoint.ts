@@ -1,12 +1,7 @@
 /**
  * CheckpointManager：计划快照持久化与崩溃恢复（v0.3.0 Phase 1）。
  *
- * 存储策略（按 Advisor 决策）：
- *   - 整个 CheckpointRecord 存单个 JSON blob 列（payload TEXT），
- *     不做规范化多表——因为永远只做"保存/加载完整快照"两种操作；
- *   - 接受 DatabaseSync 实例作为 DI，不自己开新连接——
- *     与 SessionStore 同库，审计 + 检查点自然共存，简化备份；
- *   - 表结构：plan_checkpoints(plan_id TEXT PK, snapshot_at TEXT, payload TEXT)。
+ * CheckpointRecord 通过共享 JSONL 事件流追加保存，不覆盖既有快照。
  *
  * 持久化时机（由 StepExecutor / PlanManager 调用）：
  *   - 每个 TaskStep 状态变化时（running / completed / failed / blocked）；
@@ -15,47 +10,21 @@
  *
  * 不负责执行逻辑——只有"查/存/删"原子操作，纯 CRUD。
  */
-import { DatabaseSync } from 'node:sqlite';
-import { ForgeError } from '@forgex/shared';
+import { ForgeError, JsonlEventStore } from '@forgex/shared';
 import { TASK_STATUSES, type CheckpointRecord, type TaskPlan } from './types.js';
 import { nowIso } from './types.js';
 
 /** 当前快照 schema 版本（与 types.ts CheckpointRecord.schema_version 保持一致） */
 export const CHECKPOINT_SCHEMA_VERSION = 2 as const;
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS plan_checkpoints (
-  plan_id TEXT PRIMARY KEY,
-  snapshot_at TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  abort_requested INTEGER NOT NULL DEFAULT 0
-);
-`;
-
-export interface CheckpointManagerOptions {
-  /** 允许 CheckpointManager 使用 WAL 模式（与 SessionStore 保持一致即可） */
-  enableWal?: boolean;
-}
-
 export class CheckpointManager {
-  private readonly db: DatabaseSync;
+  private readonly log: JsonlEventStore;
 
-  constructor(db: DatabaseSync, options: CheckpointManagerOptions = {}) {
-    this.db = db;
-    if (options.enableWal) {
-      try {
-        this.db.exec('PRAGMA journal_mode = WAL');
-        this.db.exec('PRAGMA busy_timeout = 3000');
-      } catch {
-        // WAL 设置失败不阻塞——可能连接是只读的（:memory: 总是成功）
-      }
-    }
-    try {
-      this.db.exec(SCHEMA);
-    } catch (err) {
-      throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '无法初始化 checkpoint 表', { cause: err });
-    }
+  private lastPlanEvent(planId: string) {
+    return this.log.readAll().findLast((event) => event.data.planId === planId);
   }
+
+  constructor(log: JsonlEventStore) { this.log = log; }
 
   /**
    * 保存（覆盖）一个计划的 checkpoint。
@@ -63,19 +32,7 @@ export class CheckpointManager {
    */
   save(record: CheckpointRecord): void {
     try {
-      const payload = JSON.stringify(record);
-      this.db
-        .prepare(
-          `INSERT OR REPLACE INTO plan_checkpoints
-           (plan_id, snapshot_at, payload, abort_requested)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(
-          record.plan_id,
-          record.snapshot_at,
-          payload,
-          record.abort_requested ? 1 : 0,
-        );
+      this.log.append('checkpoint.saved', { planId: record.plan_id, record }, this.lastPlanEvent(record.plan_id)?.id ?? null);
     } catch (err) {
       throw new ForgeError('PLANNING_CHECKPOINT_ERROR', `写入 checkpoint 失败: ${record.plan_id}`, {
         cause: err,
@@ -123,19 +80,18 @@ export class CheckpointManager {
    */
   load(planId: string): CheckpointRecord | null {
     try {
-      const row = this.db
-        .prepare('SELECT payload FROM plan_checkpoints WHERE plan_id = ?')
-        .get(planId) as { payload: string } | undefined;
-      if (!row) return null;
-      let record: CheckpointRecord;
-      try {
-        record = JSON.parse(row.payload) as CheckpointRecord;
-      } catch (parseErr) {
-        throw new ForgeError('PLANNING_CHECKPOINT_ERROR', `checkpoint payload 解析失败: ${planId}`, {
-          cause: parseErr,
-          details: { planId },
-        });
+      let record: CheckpointRecord | null = null;
+      for (const event of this.log.readAll()) {
+        if (event.data.planId !== planId) continue;
+        if (event.type === 'checkpoint.saved') {
+          if (!event.data.record || typeof event.data.record !== 'object' || Array.isArray(event.data.record)) {
+            throw new ForgeError('PLANNING_CHECKPOINT_ERROR', `checkpoint payload 解析失败: ${planId}`, { details: { planId } });
+          }
+          record = event.data.record as CheckpointRecord;
+        }
+        if (event.type === 'checkpoint.deleted') record = null;
       }
+      if (!record) return null;
       validateCheckpointRecord(record);
       return record;
     } catch (err) {
@@ -150,10 +106,13 @@ export class CheckpointManager {
   /** 列出所有有 checkpoint 的 plan_id（供"恢复哪些计划"UI 用） */
   listPlanIds(limit = 50): string[] {
     try {
-      const rows = this.db
-        .prepare('SELECT plan_id FROM plan_checkpoints ORDER BY snapshot_at DESC LIMIT ?')
-        .all(Math.max(1, limit)) as Array<{ plan_id: string }>;
-      return rows.map((r) => r.plan_id);
+      const latest = new Map<string, boolean>();
+      for (const event of this.log.readAll()) {
+        if (typeof event.data.planId !== 'string') continue;
+        if (event.type === 'checkpoint.saved') latest.set(event.data.planId, true);
+        if (event.type === 'checkpoint.deleted') latest.set(event.data.planId, false);
+      }
+      return [...latest.entries()].filter(([, exists]) => exists).map(([id]) => id).slice(-Math.max(1, limit)).reverse();
     } catch (err) {
       throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '列出 checkpoint 失败', { cause: err });
     }
@@ -162,10 +121,9 @@ export class CheckpointManager {
   /** 删除某个 plan 的 checkpoint（完成后清理） */
   delete(planId: string): boolean {
     try {
-      const info = this.db
-        .prepare('DELETE FROM plan_checkpoints WHERE plan_id = ?')
-        .run(planId) as { changes: number };
-      return info.changes > 0;
+      const existed = this.load(planId) !== null;
+      if (existed) this.log.append('checkpoint.deleted', { planId }, this.lastPlanEvent(planId)?.id ?? null);
+      return existed;
     } catch (err) {
       throw new ForgeError('PLANNING_CHECKPOINT_ERROR', `删除 checkpoint 失败: ${planId}`, {
         cause: err,
@@ -177,8 +135,9 @@ export class CheckpointManager {
   /** 全部删除（罕见操作：重置开发 / 测试清理） */
   deleteAll(): number {
     try {
-      const info = this.db.prepare('DELETE FROM plan_checkpoints').run() as { changes: number };
-      return info.changes;
+      const ids = this.listPlanIds(Number.MAX_SAFE_INTEGER);
+      for (const planId of ids) this.log.append('checkpoint.deleted', { planId }, this.lastPlanEvent(planId)?.id ?? null);
+      return ids.length;
     } catch (err) {
       throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '清空 checkpoint 失败', { cause: err });
     }
@@ -187,10 +146,7 @@ export class CheckpointManager {
   /** 某个 plan 是否有 checkpoint */
   has(planId: string): boolean {
     try {
-      const row = this.db
-        .prepare('SELECT 1 FROM plan_checkpoints WHERE plan_id = ? LIMIT 1')
-        .get(planId) as unknown as { '1': number } | undefined;
-      return row !== undefined;
+      return this.load(planId) !== null;
     } catch {
       return false;
     }

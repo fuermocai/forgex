@@ -5,7 +5,7 @@
  * 使用模拟 NodeExecutor 脱离真实 AgentLoop。
  */
 import { describe, it, expect } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import {
   WorkflowRegistry,
   WorkflowRunner,
@@ -28,7 +28,7 @@ describe('场景 A：Bug Fix Workflow 端到端', () => {
     const registry = new WorkflowRegistry();
     registerBuiltinWorkflows(registry);
 
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const checkpoint = new WorkflowCheckpoint(db);
     const auditSink = new MemoryAuditSink();
     const auditLogger = new AuditLogger({ sinks: [auditSink] });
@@ -69,7 +69,7 @@ describe('场景 A：Bug Fix Workflow 端到端', () => {
     const registry = new WorkflowRegistry();
     registerBuiltinWorkflows(registry);
 
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const checkpoint = new WorkflowCheckpoint(db);
     const auditSink = new MemoryAuditSink();
     const auditLogger = new AuditLogger({ sinks: [auditSink] });
@@ -115,7 +115,7 @@ describe('场景 A：Bug Fix Workflow 端到端', () => {
     const registry = new WorkflowRegistry();
     registerBuiltinWorkflows(registry);
 
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const checkpoint = new WorkflowCheckpoint(db);
     const auditSink = new MemoryAuditSink();
     const auditLogger = new AuditLogger({ sinks: [auditSink] });

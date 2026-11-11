@@ -12,12 +12,12 @@
  *   8. 人工核对：confirm-done / confirm-retry / block
  *   9. 数据库写入失败                 → 恢复流程失败关闭，不继续
  *
- * 说明：这里用真实 SQLite + 真实 PlanManager/CheckpointManager 构造各中断点状态，
+ * 说明：这里用真实 JSONL + 真实 PlanManager/CheckpointManager 构造各中断点状态，
  * 不用 mock 成功来声称外部副作用 exactly-once——中断步骤一律要求人工核对，
  * 恢复语义在 analyzeTaskRun 的 verdict 与 reason 里可断言。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PlanManager, SessionStore, createStep, type CheckpointRecord } from '@forgex/core';
@@ -35,8 +35,8 @@ let store: TaskRunStore;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'forgex-recovery-'));
-  dbPath = join(dir, 'sessions.db');
-  // task_runs 有 sessions 外键：先让 SessionStore 建好基础 schema（与 run.ts 一致）
+  dbPath = join(dir, 'events.jsonl');
+  // 与 run.ts 一致：SessionStore 与 TaskRunStore 共用事件流。
   new SessionStore(dbPath).close();
   store = new TaskRunStore(dbPath);
 });
@@ -81,6 +81,28 @@ function makeRun(planId: string, isolation: 'in_place' | 'worktree' = 'in_place'
 }
 
 describe('中断诊断：各崩溃窗口', () => {
+  it('任务、步骤与 checkpoint 事件共享父节点链并可从 JSONL 读取', () => {
+    const { plan } = makePlan();
+    const runId = makeRun(plan.plan_id);
+    store.upsertStepResult(runId, {
+      step_id: plan.steps[0]!.step_id,
+      final_status: 'pending',
+      attempts_used: 0,
+      duration_ms: 0,
+      verification_passed: false,
+      tool_call_count: 0,
+      evidence_count: 0,
+    });
+
+    const events = readFileSync(dbPath, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line) as { id: string; parentId: string | null; type: string; data: Record<string, unknown> });
+    const runEvent = events.find((event) => event.type === 'task.run.created' && event.data.run_id === runId)!;
+    const updateEvent = events.find((event) => event.type === 'task.run.updated' && event.data.run_id === runId)!;
+    const stepEvent = events.find((event) => event.type === 'task.step.upserted' && event.data.run_id === runId)!;
+    expect(updateEvent.parentId).toBe(runEvent.id);
+    expect(stepEvent.parentId).toBe(updateEvent.id);
+    expect(new Set(events.map((event) => event.id)).size).toBe(events.length);
+  });
+
   it('步骤开始前中断：全部 resumable，可安全恢复', async () => {
     const { plan } = makePlan();
     const runId = makeRun(plan.plan_id);
@@ -179,10 +201,13 @@ describe('快照校验：损坏 / 旧版本 / 结构问题', () => {
     const cp = store.createCheckpointManager();
     cp.save({ schema_version: 2, plan_id: plan.plan_id, snapshot_at: new Date().toISOString(), plan, abort_requested: false, completed_step_ids: [], failed_step_ids: [] });
     store.close();
-    const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(dbPath);
-    db.prepare("UPDATE plan_checkpoints SET payload = '{not-json' WHERE plan_id = ?").run(plan.plan_id);
-    db.close();
+    const lines = readFileSync(dbPath, 'utf8').trim().split(/\r?\n/);
+    const index = lines.findLastIndex((line) => (JSON.parse(line) as { type?: string; data?: { planId?: string } }).type === 'checkpoint.saved'
+      && (JSON.parse(line) as { data?: { planId?: string } }).data?.planId === plan.plan_id);
+    const event = JSON.parse(lines[index]!) as { data: Record<string, unknown> };
+    event.data.record = '{not-json';
+    lines[index] = JSON.stringify(event);
+    writeFileSync(dbPath, `${lines.join('\n')}\n`);
     store = new TaskRunStore(dbPath);
 
     const analysis = await analyzeTaskRun(store, runId);
@@ -205,10 +230,13 @@ describe('快照校验：损坏 / 旧版本 / 结构问题', () => {
     };
     cp.save({ ...v1, schema_version: 2 } as CheckpointRecord);
     store.close();
-    const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(dbPath);
-    db.prepare('UPDATE plan_checkpoints SET payload = ? WHERE plan_id = ?').run(JSON.stringify(v1), plan.plan_id);
-    db.close();
+    const lines = readFileSync(dbPath, 'utf8').trim().split(/\r?\n/);
+    const index = lines.findLastIndex((line) => (JSON.parse(line) as { type?: string; data?: { planId?: string } }).type === 'checkpoint.saved'
+      && (JSON.parse(line) as { data?: { planId?: string } }).data?.planId === plan.plan_id);
+    const event = JSON.parse(lines[index]!) as { data: Record<string, unknown> };
+    event.data.record = v1;
+    lines[index] = JSON.stringify(event);
+    writeFileSync(dbPath, `${lines.join('\n')}\n`);
     store = new TaskRunStore(dbPath);
 
     const analysis = await analyzeTaskRun(store, runId);
@@ -375,29 +403,26 @@ function analysisWillRun(record: CheckpointRecord, stepId: string): boolean {
   return step.status === 'ready' || step.status === 'pending';
 }
 
-describe('数据库写入失败：失败关闭', () => {
+describe('事件存储失败：失败关闭', () => {
   it('checkpoint 表损坏时，诊断报 unrecoverable 而不是给出可恢复结论', async () => {
     const { plan } = makePlan();
     const runId = makeRun(plan.plan_id);
     store.close();
-    // 破坏 checkpoint 表（模拟磁盘/权限故障后的损坏库）
-    const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(dbPath);
-    db.exec('DROP TABLE plan_checkpoints');
-    db.close();
+    // 追加删除事件，模拟 checkpoint 丢失后的失败关闭诊断。
+    const { appendFileSync } = await import('node:fs');
+    appendFileSync(dbPath, `${JSON.stringify({ id: 'checkpoint-drop-test', parentId: null, ts: new Date().toISOString(), type: 'checkpoint.deleted', data: { planId: plan.plan_id } })}\n`);
     store = new TaskRunStore(dbPath);
-    // 重建表但内容为空 → 等价于"快照丢失"
     const analysis = await analyzeTaskRun(store, runId);
     expect(analysis.verdict).toBe('unrecoverable');
   });
 
   it('TaskRunStore 建在只读位置时构造失败（不静默降级为无快照运行）', () => {
-    const badPath = join(dir, 'no-such-subdir', 'x.db');
+    const badPath = join(dir, 'no-such-subdir', 'events.jsonl');
     // mkdirSync 不会被 store 内部 mkdir 补出来？——store 会尝试 mkdir(dirname)，父目录不存在会抛
     expect(() => new TaskRunStore(badPath)).not.toThrow();
     // 存在但损坏的库文件：无法打开 → 构造抛错，run 启动即失败
-    const corrupt = join(dir, 'corrupt.db');
-    writeFileSync(corrupt, 'not a sqlite file at all');
+    const corrupt = join(dir, 'corrupt.jsonl');
+    writeFileSync(corrupt, 'not a valid event log');
     expect(() => new TaskRunStore(corrupt)).toThrow();
   });
 });

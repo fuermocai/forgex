@@ -12,7 +12,7 @@
 | 上下文压缩倾向"LLM 摘要" | 额外模型调用、成本高、破坏 tool_call 配对、离线不可控 | 确定性压缩：先截断工具输出，再按 user 边界删旧轮次，最后强截断/减半；压缩后就地更新历史，保证协议合法 |
 | 各工具自行判断权限 | 规则重复、易绕过、无法统一审计 | 所有模型工具调用必须经统一 Dispatcher；工具内的 `CommandGuard.validateStructure` 只是纵深防御 |
 | 工具输出"统一结构"但无大小上限 | 大日志会撑爆上下文与内存 | 工具级 `maxOutputBytes` + Dispatcher 二次限流；超限时 `data` 替换为截断预览并标记 `truncated` |
-| 审计与会话各自落盘 | 两套写入可能不一致，故障时难以关联 | SQLite 会话库同时实现 `AuditSink`；JSONL 审计文件是附加输出，任一 sink 失败不影响主流程 |
+| 审计、会话、任务分别落盘 | 多套写入可能不一致，故障时难以关联 | 共享 JSONL 事件流保存会话、审计、指标与任务；事件 ID 和父节点支持追溯与分支 |
 | 一开始就上 Rust Sandbox | 跨语言协议、构建链、离线分发成本高，收益在 MVP 阶段有限 | Rust 只承担"进程执行"这一明确系统职责；Node 执行器保留为默认兜底；通过 `FORGEX_EXECUTOR` / `.forgex/bin` 启用 |
 | TUI 直接调用 Agent 内部方法 | UI 与 Runtime 强耦合，难以测试 | Agent 只暴露 `run()` 与 `EventBus`；审批通过 `ApprovalBridge` 解耦，TUI/纯文本复用同一 Runtime |
 | 依赖第三方 zod→JSON Schema 转换 | 增加供应链面，离线安装负担 | 自实现 `zodToJsonSchema` 子集（object/string/number/enum/array/union/record 等），只覆盖工具参数所需语法 |
@@ -55,7 +55,7 @@ crates/executor ──► serde / serde_json（独立进程，无 TS 依赖）
 - `ModelProvider.chat(request, handlers)`：返回完整 assistant 消息与 usage，支持流式回调与 `AbortSignal`。
 - `ToolDefinition.execute(input, ctx)`：只返回 `ToolOutcome`，不抛异常；不自行判断权限。
 - `WorkspaceResolver.resolve(target, mode, cwd)`：Security 注入的路径解析器，禁止工具自行拼路径。
-- `AuditSink.write(event)`：会话库、JSONL 文件、内存 sink 均实现同一接口。
+- `AuditSink.write(event)`：共享 JSONL 事件流与内存 sink 均实现同一接口。
 - `ApprovalHandler(request) => Promise<boolean>`：无 handler 时自动拒绝。
 
 ## 3. 最小可运行闭环
@@ -77,7 +77,14 @@ crates/executor ──► serde / serde_json（独立进程，无 TS 依赖）
   → 持久化消息、记录指标、输出事件
 ```
 
-这个闭环不依赖任何 Demo 数据：模型是真实 HTTP 服务，工具读写真实文件/系统，会话写入真实 SQLite。
+这个闭环不依赖任何 Demo 数据：模型是真实 HTTP 服务，工具读写真实文件/系统，会话、审计、指标和任务记录追加到 `.forgex/events.jsonl`。
+
+## 7. 会话输入、分支与扩展
+
+- Agent 运行期间的普通输入进入 steering 队列，在当前工具批次结束后加入模型上下文；`/followup` 在当前任务完成后另起一轮。两类输入都可查看和移除，Ctrl+C 取消当前执行。
+- 会话消息、任务运行、审批审计、指标、checkpoint 和摘要共享追加式 JSONL 事件流。每条事件包含唯一 ID、父事件 ID、时间、类型和数据；从历史消息分支会创建新会话并保留父分支引用。
+- 上下文超预算时先请求结构化摘要，要求保留目标、约束、事实、完成项、未完成项和证据引用。摘要事件作为新记录持久化；原消息不覆盖。摘要服务失败时回退到确定性压缩并发出告警。
+- `ForgeExtension` 可注册工具、斜杠命令和生命周期监听。扩展在进程内运行，属于可信代码；扩展工具调用仍统一经过 ToolDispatcher 的参数校验、策略、审批和审计。CLI 当前通过 `createRuntime({ extensions })` 注入扩展，不自动加载任意目录中的代码。
 
 ## 4. 逐文件实现顺序（实际执行）
 

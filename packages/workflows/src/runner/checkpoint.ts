@@ -1,55 +1,21 @@
 /**
  * WorkflowCheckpoint：工作流快照持久化与崩溃恢复（v0.4.0 Phase 1）。
  *
- * 存储策略（复用 v0.3.0 CheckpointManager 模式）：
- *   - 整个 WorkflowCheckpointRecord 存单个 JSON blob 列（payload TEXT）；
- *   - 接受 DatabaseSync 实例作为 DI；
- *   - 表结构：workflow_checkpoints(workflow_instance_id TEXT PK, snapshot_at TEXT, payload TEXT)。
+ * 工作流快照通过共享 JSONL 事件流追加保存，删除也保留历史事件。
  *
  * 持久化时机（由 WorkflowRunner 调用）：
  *   - 执行节点前先保存 running，节点结束后再保存最终状态；
  *   - 工作流取消时；
  *   - 恢复时校验定义版本与节点集合；遇到 running 节点时暂停，避免重复副作用。
  */
-import { DatabaseSync } from 'node:sqlite';
-import { ForgeError } from '@forgex/shared';
+import { ForgeError, JsonlEventStore } from '@forgex/shared';
 import type { WorkflowCheckpointRecord } from '../types.js';
 import { workflowNowIso } from '../types.js';
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS workflow_checkpoints (
-  workflow_instance_id TEXT PRIMARY KEY,
-  snapshot_at TEXT NOT NULL,
-  payload TEXT NOT NULL
-);
-`;
-
-export interface WorkflowCheckpointOptions {
-  /** 允许使用 WAL 模式 */
-  enableWal?: boolean;
-}
-
 export class WorkflowCheckpoint {
-  private readonly db: DatabaseSync;
+  private readonly events: JsonlEventStore;
 
-  constructor(db: DatabaseSync, options: WorkflowCheckpointOptions = {}) {
-    this.db = db;
-    if (options.enableWal) {
-      try {
-        this.db.exec('PRAGMA journal_mode = WAL');
-        this.db.exec('PRAGMA busy_timeout = 3000');
-      } catch {
-        // WAL 设置失败不阻塞
-      }
-    }
-    try {
-      this.db.exec(SCHEMA);
-    } catch (err) {
-      throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '无法初始化 workflow checkpoint 表', {
-        cause: err,
-      });
-    }
-  }
+  constructor(events: JsonlEventStore) { this.events = events; }
 
   /**
    * 保存（覆盖）一个工作流实例的 checkpoint。
@@ -57,14 +23,8 @@ export class WorkflowCheckpoint {
    */
   save(record: WorkflowCheckpointRecord): void {
     try {
-      const payload = JSON.stringify(record);
-      this.db
-        .prepare(
-          `INSERT OR REPLACE INTO workflow_checkpoints
-           (workflow_instance_id, snapshot_at, payload)
-           VALUES (?, ?, ?)`,
-        )
-        .run(record.workflow_instance_id, record.snapshot_at, payload);
+      const parent = this.events.readAll().findLast((event) => event.data.workflowInstanceId === record.workflow_instance_id);
+      this.events.append('workflow.checkpoint.saved', { workflowInstanceId: record.workflow_instance_id, record }, parent?.id ?? null);
     } catch (err) {
       throw new ForgeError(
         'PLANNING_CHECKPOINT_ERROR',
@@ -80,11 +40,15 @@ export class WorkflowCheckpoint {
    */
   load(workflowInstanceId: string): WorkflowCheckpointRecord | null {
     try {
-      const row = this.db
-        .prepare('SELECT payload FROM workflow_checkpoints WHERE workflow_instance_id = ?')
-        .get(workflowInstanceId) as { payload: string } | undefined;
-      if (!row) return null;
-      return JSON.parse(row.payload) as WorkflowCheckpointRecord;
+      let record: WorkflowCheckpointRecord | null = null;
+      for (const event of this.events.readAll()) {
+        if (event.data.workflowInstanceId !== workflowInstanceId) continue;
+        if (event.type === 'workflow.checkpoint.saved' && event.data.record && typeof event.data.record === 'object' && !Array.isArray(event.data.record)) {
+          record = event.data.record as WorkflowCheckpointRecord;
+        }
+        if (event.type === 'workflow.checkpoint.deleted') record = null;
+      }
+      return record;
     } catch (err) {
       throw new ForgeError(
         'PLANNING_CHECKPOINT_ERROR',
@@ -97,9 +61,8 @@ export class WorkflowCheckpoint {
   /** 删除一个工作流实例的 checkpoint */
   delete(workflowInstanceId: string): void {
     try {
-      this.db
-        .prepare('DELETE FROM workflow_checkpoints WHERE workflow_instance_id = ?')
-        .run(workflowInstanceId);
+      const parent = this.events.readAll().findLast((event) => event.data.workflowInstanceId === workflowInstanceId);
+      this.events.append('workflow.checkpoint.deleted', { workflowInstanceId }, parent?.id ?? null);
     } catch (err) {
       throw new ForgeError(
         'PLANNING_CHECKPOINT_ERROR',
@@ -112,10 +75,13 @@ export class WorkflowCheckpoint {
   /** 列出所有 checkpoint 的 workflow_instance_id */
   listIds(): string[] {
     try {
-      const rows = this.db
-        .prepare('SELECT workflow_instance_id FROM workflow_checkpoints')
-        .all() as Array<{ workflow_instance_id: string }>;
-      return rows.map((r) => r.workflow_instance_id);
+      const latest = new Map<string, boolean>();
+      for (const event of this.events.readAll()) {
+        if (typeof event.data.workflowInstanceId !== 'string') continue;
+        if (event.type === 'workflow.checkpoint.saved') latest.set(event.data.workflowInstanceId, true);
+        if (event.type === 'workflow.checkpoint.deleted') latest.set(event.data.workflowInstanceId, false);
+      }
+      return [...latest.entries()].filter(([, exists]) => exists).map(([id]) => id);
     } catch (err) {
       throw new ForgeError('PLANNING_CHECKPOINT_ERROR', '列出 workflow checkpoint 失败', {
         cause: err,

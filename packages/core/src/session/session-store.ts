@@ -1,17 +1,4 @@
-/**
- * SessionStore：会话、消息、审计与指标的本地持久化（SQLite）。
- *
- * 为什么用 node:sqlite：
- *  - 零原生编译依赖，适合离线/内网部署（better-sqlite3 需要构建工具链）；
- *  - 单文件数据库易于备份与审计；
- *  - 不引入任何网络服务。
- *
- * 注意：Node 22 将 node:sqlite 标记为 experimental，会打印一次警告；
- * 功能可用，且数据格式是标准 SQLite 文件，后续可平滑迁移。
- */
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+/** JSONL-backed session, audit, metric, task and checkpoint event store. */
 import {
   ForgeError,
   sessionId as newSessionId,
@@ -19,6 +6,7 @@ import {
   type RunMetrics,
 } from '@forgex/shared';
 import type { AuditEvent, AuditSink } from '@forgex/security';
+import { JsonlEventStore, type JsonlEvent } from './jsonl-event-store.js';
 
 export interface SessionRecord {
   id: string;
@@ -28,243 +16,126 @@ export interface SessionRecord {
   model: string;
   title: string | null;
   status: string;
+  parentSessionId?: string;
+  parentMessageId?: string;
 }
-
-export interface CreateSessionInput {
-  workspace: string;
-  model: string;
-  title?: string;
-  id?: string;
-}
-
-export interface UpdateSessionPatch {
-  title?: string;
-  status?: string;
-  /** 运行时切换模型后同步会话记录 */
-  model?: string;
-}
-
+export interface CreateSessionInput { workspace: string; model: string; title?: string; id?: string; parentSessionId?: string; parentMessageId?: string; }
+export interface UpdateSessionPatch { title?: string; status?: string; model?: string; }
 type Row = Record<string, unknown>;
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  workspace TEXT NOT NULL,
-  model TEXT NOT NULL,
-  title TEXT,
-  status TEXT NOT NULL DEFAULT 'active'
-);
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT,
-  tool_calls TEXT,
-  tool_call_id TEXT,
-  name TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
-CREATE TABLE IF NOT EXISTS audit_events (
-  id TEXT PRIMARY KEY,
-  session_id TEXT,
-  ts TEXT NOT NULL,
-  type TEXT NOT NULL,
-  payload TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_events(session_id, ts);
-CREATE TABLE IF NOT EXISTS metrics (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  ts TEXT NOT NULL,
-  payload TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_metrics_session ON metrics(session_id, id);
-`;
-
 export class SessionStore implements AuditSink {
-  private readonly db: DatabaseSync;
+  private readonly log: JsonlEventStore;
+  private events: JsonlEvent[];
 
-  constructor(dbPath: string) {
-    if (dbPath !== ':memory:') {
-      mkdirSync(dirname(dbPath), { recursive: true });
-    }
-    try {
-      this.db = new DatabaseSync(dbPath);
-    } catch (err) {
-      throw new ForgeError('SESSION_ERROR', `无法打开会话数据库: ${dbPath}`, { cause: err });
-    }
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA busy_timeout = 3000');
-    this.db.exec(SCHEMA);
+  constructor(path: string) {
+    this.log = new JsonlEventStore(path);
+    this.events = this.log.readAll();
   }
 
   createSession(input: CreateSessionInput): SessionRecord {
-    const id = input.id ?? newSessionId();
     const now = new Date().toISOString();
-    this.db
-      .prepare('INSERT INTO sessions (id, created_at, updated_at, workspace, model, title, status) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, now, now, input.workspace, input.model, input.title ?? null, 'active');
-    return {
-      id,
-      createdAt: now,
-      updatedAt: now,
-      workspace: input.workspace,
-      model: input.model,
-      title: input.title ?? null,
-      status: 'active',
+    const record: SessionRecord = {
+      id: input.id ?? newSessionId(), createdAt: now, updatedAt: now,
+      workspace: input.workspace, model: input.model, title: input.title ?? null, status: 'active',
+      ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+      ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
     };
+    this.push('session.created', record as unknown as Row, input.parentMessageId ?? null);
+    return record;
   }
 
   getSession(id: string): SessionRecord | null {
-    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Row | undefined;
-    return row ? mapSession(row) : null;
+    let session: SessionRecord | null = null;
+    for (const event of this.latestEvents()) {
+      if (event.type === 'session.created' && event.data.id === id) session = event.data as unknown as SessionRecord;
+      else if (event.type === 'session.updated' && event.data.id === id && session) {
+        const patch = isRecord(event.data.patch) ? event.data.patch : {};
+        session = Object.assign({}, session, patch, { updatedAt: event.ts }) as SessionRecord;
+      }
+    }
+    return session;
   }
 
   listSessions(limit = 20): SessionRecord[] {
-    const rows = this.db
-      .prepare('SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?')
-      .all(Math.max(1, limit)) as Row[];
-    return rows.map(mapSession);
+    const ids = new Set(this.latestEvents().filter((event) => event.type === 'session.created').map((event) => String(event.data.id)));
+    return [...ids].map((id) => this.getSession(id)).filter((item): item is SessionRecord => item !== null)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, Math.max(1, limit));
   }
 
   updateSession(id: string, patch: UpdateSessionPatch): void {
-    const current = this.getSession(id);
-    if (!current) return;
-    this.db
-      .prepare('UPDATE sessions SET title = ?, status = ?, model = ?, updated_at = ? WHERE id = ?')
-      .run(
-        patch.title ?? current.title,
-        patch.status ?? current.status,
-        patch.model ?? current.model,
-        new Date().toISOString(),
-        id,
-      );
+    if (!this.getSession(id)) return;
+    const parent = this.latestEvents().findLast((event) => event.data.id === id && (event.type === 'session.created' || event.type === 'session.updated'));
+    this.push('session.updated', { id, patch }, parent?.id ?? null);
   }
 
   appendMessage(sessionId: string, message: ChatMessage): void {
-    const now = new Date().toISOString();
-    try {
-      this.db
-        .prepare(
-          'INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(
-          sessionId,
-          message.role,
-          message.content,
-          message.tool_calls ? JSON.stringify(message.tool_calls) : null,
-          message.tool_call_id ?? null,
-          message.name ?? null,
-          now,
-        );
-      this.db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
-    } catch (err) {
-      throw new ForgeError('SESSION_ERROR', '写入会话消息失败', { cause: err, details: { sessionId } });
-    }
+    if (!this.getSession(sessionId)) throw new ForgeError('SESSION_ERROR', `会话不存在: ${sessionId}`);
+    const parent = this.listMessageEntries(sessionId).at(-1)?.id
+      ?? this.latestEvents().find((event) => event.type === 'session.created' && event.data.id === sessionId)?.id
+      ?? null;
+    this.push('message.appended', { sessionId, message }, parent);
   }
 
   getMessages(sessionId: string): ChatMessage[] {
-    const rows = this.db
-      .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC')
-      .all(sessionId) as Row[];
-    return rows.map((row) => {
-      const role = String(row.role);
-      if (!['system', 'user', 'assistant', 'tool'].includes(role)) {
-        throw new ForgeError('SESSION_ERROR', `会话消息 ${String(row.id)} 的 role 无效`, {
-          details: { sessionId, messageId: row.id, role },
-        });
-      }
-      const message: ChatMessage = {
-        role: role as ChatMessage['role'],
-        content: row.content === null ? null : String(row.content),
-      };
-      if (typeof row.tool_calls === 'string' && row.tool_calls.length > 0) {
-        try {
-          const parsed: unknown = JSON.parse(row.tool_calls);
-          if (!Array.isArray(parsed) || !parsed.every(isStoredToolCall)) throw new TypeError('tool_calls 结构无效');
-          message.tool_calls = parsed as ChatMessage['tool_calls'];
-        } catch (err) {
-          throw new ForgeError('SESSION_ERROR', `会话消息 ${String(row.id)} 的工具调用历史损坏，拒绝静默丢弃`, {
-            details: { sessionId, messageId: row.id },
-            cause: err,
-          });
-        }
-      }
-      if (typeof row.tool_call_id === 'string') message.tool_call_id = row.tool_call_id;
-      if (typeof row.name === 'string') message.name = row.name;
-      return message;
-    });
+    return this.latestEvents().filter((event) => event.type === 'message.appended' && event.data.sessionId === sessionId)
+      .map((event) => event.data.message as ChatMessage);
   }
 
-  /** 实现 AuditSink：审计事件直接落库 */
-  write(event: AuditEvent): void {
-    try {
-      this.db
-        .prepare('INSERT OR REPLACE INTO audit_events (id, session_id, ts, type, payload) VALUES (?, ?, ?, ?, ?)')
-        .run(event.id, event.sessionId ?? null, event.ts, event.type, JSON.stringify(event));
-    } catch (err) {
-      throw new ForgeError('AUDIT_ERROR', '写入审计事件失败', { cause: err, details: { eventId: event.id } });
-    }
+  listMessageEntries(sessionId: string): Array<{ id: string; message: ChatMessage }> {
+    return this.latestEvents().filter((event) => event.type === 'message.appended' && event.data.sessionId === sessionId)
+      .map((event) => ({ id: event.id, message: event.data.message as ChatMessage }));
   }
+
+  forkSession(sessionId: string, messageId?: string, newId?: string): SessionRecord {
+    const source = this.getSession(sessionId);
+    if (!source) throw new ForgeError('SESSION_ERROR', `源会话不存在: ${sessionId}`);
+    const entries = this.listMessageEntries(sessionId);
+    const index = messageId === undefined ? entries.length - 1 : entries.findIndex((entry) => entry.id === messageId);
+    if (messageId !== undefined && index < 0) throw new ForgeError('SESSION_ERROR', `分支起点不存在: ${messageId}`);
+    const forkPoint = index >= 0 ? entries[index]!.id : undefined;
+    const branch = this.createSession({ workspace: source.workspace, model: source.model, title: source.title ? `${source.title} (branch)` : undefined,
+      ...(newId ? { id: newId } : {}), parentSessionId: sessionId, ...(forkPoint ? { parentMessageId: forkPoint } : {}) });
+    for (const entry of entries.slice(0, index + 1)) this.appendMessage(branch.id, entry.message);
+    return branch;
+  }
+
+  write(event: AuditEvent): void { this.appendEvent('audit.recorded', { event, sessionId: event.sessionId ?? null }); }
 
   getAuditEvents(sessionId: string, limit = 200): AuditEvent[] {
-    const rows = this.db
-      .prepare('SELECT payload FROM audit_events WHERE session_id = ? ORDER BY ts DESC LIMIT ?')
-      .all(sessionId, Math.max(1, limit)) as Row[];
-    const events: AuditEvent[] = [];
-    for (const row of rows) {
-      try {
-        events.push(JSON.parse(String(row.payload)) as AuditEvent);
-      } catch {
-        // 跳过损坏记录
-      }
-    }
-    return events.reverse();
+    return this.latestEvents().filter((event) => event.type === 'audit.recorded' && event.data.sessionId === sessionId)
+      .slice(-Math.max(1, limit)).map((event) => event.data.event as AuditEvent);
   }
 
-  recordMetrics(sessionId: string, metrics: RunMetrics): void {
-    this.db
-      .prepare('INSERT INTO metrics (session_id, ts, payload) VALUES (?, ?, ?)')
-      .run(sessionId, new Date().toISOString(), JSON.stringify(metrics));
-  }
+  recordMetrics(sessionId: string, metrics: RunMetrics): void { this.appendEvent('metrics.recorded', { sessionId, metrics }); }
 
   getLatestMetrics(sessionId: string): RunMetrics | null {
-    const row = this.db
-      .prepare('SELECT payload FROM metrics WHERE session_id = ? ORDER BY id DESC LIMIT 1')
-      .get(sessionId) as Row | undefined;
-    if (!row) return null;
-    try {
-      return JSON.parse(String(row.payload)) as RunMetrics;
-    } catch {
-      return null;
-    }
+    const event = this.latestEvents().findLast((item) => item.type === 'metrics.recorded' && item.data.sessionId === sessionId);
+    return (event?.data.metrics as RunMetrics | undefined) ?? null;
   }
 
-  close(): void {
-    this.db.close();
+  /** Used by the task/checkpoint JSONL adapters to share this same event stream. */
+  appendEvent(type: string, data: Row, parentId: string | null = null): JsonlEvent {
+    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : null;
+    const parent = parentId ?? (sessionId
+      ? this.latestEvents().findLast((event) => event.type === 'message.appended' && event.data.sessionId === sessionId)?.id ?? null
+      : null);
+    return this.push(type, data, parent);
+  }
+  readEvents(type?: string): JsonlEvent[] { return this.latestEvents().filter((event) => !type || event.type === type); }
+  get filePath(): string { return this.log.filePath; }
+  close(): void { /* synchronous append-only file; nothing to flush */ }
+
+  private push(type: string, data: Row, parentId: string | null = null): JsonlEvent {
+    const event = this.log.append(type, data, parentId);
+    this.events.push(event);
+    return event;
+  }
+  private latestEvents(): JsonlEvent[] {
+    this.events = this.log.readAll();
+    return this.events;
   }
 }
 
-function mapSession(row: Row): SessionRecord {
-  return {
-    id: String(row.id),
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
-    workspace: String(row.workspace),
-    model: String(row.model),
-    title: row.title === null ? null : String(row.title),
-    status: String(row.status),
-  };
-}
-
-function isStoredToolCall(value: unknown): value is NonNullable<ChatMessage['tool_calls']>[number] {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const call = value as Record<string, unknown>;
-  if (typeof call.id !== 'string' || call.id.length === 0 || call.type !== 'function') return false;
-  if (!call.function || typeof call.function !== 'object' || Array.isArray(call.function)) return false;
-  const fn = call.function as Record<string, unknown>;
-  return typeof fn.name === 'string' && fn.name.length > 0 && typeof fn.arguments === 'string';
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }

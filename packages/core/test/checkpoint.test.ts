@@ -1,11 +1,11 @@
 /**
  * CheckpointManager 单元测试。
  *
- * 全部用 :memory: SQLite（node:sqlite DatabaseSync）——无文件系统副作用，
+ * 全部用内存 JsonlEventStore——无文件系统副作用，
  * 崩溃恢复场景通过"关 db → 开新连接 → load"模拟。
  */
 import { describe, expect, it } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { CheckpointManager } from '../src/planning/checkpoint.js';
 import {
   createStep,
@@ -15,8 +15,8 @@ import {
   type TaskPlan,
 } from '../src/planning/types.js';
 
-function freshDb(): DatabaseSync {
-  return new DatabaseSync(':memory:');
+function freshDb(): JsonlEventStore {
+  return new JsonlEventStore(':memory:');
 }
 
 function samplePlan(overrides: Partial<TaskPlan> = {}): TaskPlan {
@@ -103,7 +103,7 @@ describe('CheckpointManager', () => {
   it('崩溃恢复：关 db → 重开 → load 还原完整快照', () => {
     // 注意 :memory: db 关了会消失，但走同一内存连接是恢复不出来的。
     // 这里改用"同一个 db 实例被 GC 前另开一个 manager 读"——实际上
-    // node:sqlite :memory: 每个 DatabaseSync 是独立连接，所以验证
+    // 每个内存 JsonlEventStore 都是独立实例，所以验证
     // snapshotPlan 生成的 CheckpointRecord 本身是 JSON-safe 即可。
     const db = freshDb();
     const mgr1 = new CheckpointManager(db);

@@ -8,7 +8,7 @@
  *   4. ApprovalManager：L0 自动放行、L3 非交互拒绝、参数哈希复用、撤销、过期。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { AuditLogger, MemoryAuditSink } from '@forgex/security';
 import { hashParams, hashCommand } from '../src/requests/param-hasher.js';
 import { ApprovalPolicy } from '../src/policy/approval-policy.js';
@@ -93,11 +93,11 @@ describe('ApprovalPolicy', () => {
 });
 
 describe('ApprovalStore', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let store: ApprovalStore;
 
   beforeEach(() => {
-    db = new DatabaseSync(':memory:');
+    db = new JsonlEventStore(':memory:');
     store = new ApprovalStore(db);
   });
 
@@ -184,13 +184,13 @@ describe('ApprovalStore', () => {
 });
 
 describe('ApprovalManager', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let store: ApprovalStore;
   let auditSink: MemoryAuditSink;
   let auditLogger: AuditLogger;
 
   beforeEach(() => {
-    db = new DatabaseSync(':memory:');
+    db = new JsonlEventStore(':memory:');
     store = new ApprovalStore(db);
     auditSink = new MemoryAuditSink();
     auditLogger = new AuditLogger({ sinks: [auditSink] });

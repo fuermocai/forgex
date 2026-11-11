@@ -12,7 +12,7 @@
  * v0.3.0 vs v0.4.0 的完整对比需在相同环境下分别运行。
  */
 import { describe, it, expect } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -49,7 +49,7 @@ describe('v0.4.0 Benchmark', () => {
   it('工作流执行 P50/P95 延迟', async () => {
     const registry = new WorkflowRegistry();
     registerBuiltinWorkflows(registry);
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const checkpoint = new WorkflowCheckpoint(db);
     const auditSink = new MemoryAuditSink();
     const auditLogger = new AuditLogger({ sinks: [auditSink] });
@@ -92,7 +92,7 @@ describe('v0.4.0 Benchmark', () => {
   });
 
   it('审批处理延迟（L0 自动放行）', () => {
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const store = new ApprovalStore(db);
     const auditSink = new MemoryAuditSink();
     const auditLogger = new AuditLogger({ sinks: [auditSink] });
@@ -146,7 +146,7 @@ describe('v0.4.0 Benchmark', () => {
   });
 
   it('检查点恢复延迟', async () => {
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const store = new CheckpointStore(db);
     const metrics = new MetricsCollector();
 

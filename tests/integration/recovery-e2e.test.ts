@@ -8,7 +8,7 @@
  *   - 环境不兼容时拒绝恢复。
  */
 import { describe, it, expect } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import {
   WorkflowRegistry,
   WorkflowRunner,
@@ -48,7 +48,7 @@ describe('场景 E：任务恢复端到端', () => {
     const registry = new WorkflowRegistry();
     registerBuiltinWorkflows(registry);
 
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const checkpoint = new WorkflowCheckpoint(db);
     const auditSink = new MemoryAuditSink();
     const auditLogger = new AuditLogger({ sinks: [auditSink] });
@@ -86,7 +86,7 @@ describe('场景 E：任务恢复端到端', () => {
     expect(firstState).toBe('failed');
 
     // 创建恢复检查点（模拟真实进程崩溃后的检查点）
-    const recoveryDb = new DatabaseSync(':memory:');
+    const recoveryDb = new JsonlEventStore(':memory:');
     const recoveryStore = new CheckpointStore(recoveryDb);
     const cp = recoveryStore.create({
       workflowRunId: 'run-crash',
@@ -127,7 +127,7 @@ describe('场景 E：任务恢复端到端', () => {
   });
 
   it('环境不兼容时拒绝恢复', () => {
-    const recoveryDb = new DatabaseSync(':memory:');
+    const recoveryDb = new JsonlEventStore(':memory:');
     const recoveryStore = new CheckpointStore(recoveryDb);
     const cp = recoveryStore.create({
       workflowRunId: 'run-1',
@@ -149,7 +149,7 @@ describe('场景 E：任务恢复端到端', () => {
   });
 
   it('权限策略版本不匹配时拒绝恢复', () => {
-    const recoveryDb = new DatabaseSync(':memory:');
+    const recoveryDb = new JsonlEventStore(':memory:');
     const recoveryStore = new CheckpointStore(recoveryDb);
     const cp = recoveryStore.create({
       workflowRunId: 'run-1',
@@ -171,7 +171,7 @@ describe('场景 E：任务恢复端到端', () => {
   });
 
   it('RecoveryManager 集成：副作用操作需人工确认', async () => {
-    const recoveryDb = new DatabaseSync(':memory:');
+    const recoveryDb = new JsonlEventStore(':memory:');
     const recoveryStore = new CheckpointStore(recoveryDb);
     const manager = new RecoveryManager({
       checkpoints: recoveryStore,

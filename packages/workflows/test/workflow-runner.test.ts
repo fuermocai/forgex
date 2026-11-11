@@ -11,7 +11,7 @@
  *   5. 检查点恢复后从最后一个未终态节点继续。
  */
 import { describe, it, expect, vi } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { WorkflowRunner, type NodeExecutor, type WorkflowContext } from '../src/runner/workflow-runner.js';
 import { WorkflowCheckpoint } from '../src/runner/checkpoint.js';
 import {
@@ -204,7 +204,7 @@ describe('WorkflowRunner - maxSteps 防无限循环', () => {
 
 describe('WorkflowRunner - 检查点恢复', () => {
   it('崩溃恢复后从检查点继续，已完成节点不重复执行', async () => {
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const checkpoint = new WorkflowCheckpoint(db);
 
     let task1Executed = 0;
@@ -278,7 +278,7 @@ describe('WorkflowRunner - 检查点恢复', () => {
   });
 
   it('版本不兼容时抛错', async () => {
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const checkpoint = new WorkflowCheckpoint(db);
 
     const def = makeLinearWorkflow();

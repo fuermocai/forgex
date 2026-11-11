@@ -4,7 +4,7 @@
  * 设计取舍：
  *  - 审计写失败不能让 Agent 崩溃，但必须记录错误（AUDIT_ERROR），否则等于丢失证据链；
  *  - 事件在进入 sink 前统一脱敏，API Key / 密码不会落盘；
- *  - 支持多 sink（JSONL 文件 + 会话数据库内存队列），便于后续接入企业 SIEM；
+ *  - 支持多 sink（JSONL 主事件流 + 可选外部 sink），便于后续接入企业 SIEM；
  *  - 事件 id 使用 UUID，ts 使用 ISO 字符串，便于跨时区检索。
  */
 import { appendFile, mkdir } from 'node:fs/promises';

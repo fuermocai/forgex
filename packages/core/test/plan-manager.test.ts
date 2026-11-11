@@ -11,7 +11,7 @@
  *   7. reshapePlan 重规划时已完成步骤保留
  */
 import { describe, expect, it } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import {
   createStep,
   newPlanId,
@@ -373,7 +373,7 @@ describe('PlanManager + CheckpointManager', () => {
   });
 
   it('传 checkpoint → createPlan 和 updateStepStatus 都触发 snapshot', () => {
-    const db = new DatabaseSync(':memory:');
+    const db = new JsonlEventStore(':memory:');
     const ckpt = new CheckpointManager(db);
     const mgr = new PlanManager({ checkpoint: ckpt });
 

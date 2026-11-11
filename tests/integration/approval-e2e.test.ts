@@ -7,19 +7,19 @@
  *   - 参数变化需要重新审批。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { AuditLogger, MemoryAuditSink } from '@forgex/security';
 import { ApprovalManager } from '@forgex/approval';
 import { ApprovalStore } from '@forgex/approval';
 
 describe('场景 D：人工审批端到端', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let store: ApprovalStore;
   let auditSink: MemoryAuditSink;
   let auditLogger: AuditLogger;
 
   beforeEach(() => {
-    db = new DatabaseSync(':memory:');
+    db = new JsonlEventStore(':memory:');
     store = new ApprovalStore(db);
     auditSink = new MemoryAuditSink();
     auditLogger = new AuditLogger({ sinks: [auditSink] });

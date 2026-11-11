@@ -1,24 +1,24 @@
 /**
  * WorkflowCheckpoint 测试（v0.4.0 Phase 1）。
  *
- * 使用 :memory: SQLite 数据库测试 save/load/delete。
+ * 使用内存 JsonlEventStore 测试 save/load/delete。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { WorkflowCheckpoint, buildCheckpointRecord } from '../src/runner/checkpoint.js';
 import { createWorkflowNode, type WorkflowState } from '../src/types.js';
 
-function createDb(): DatabaseSync {
-  return new DatabaseSync(':memory:');
+function createDb(): JsonlEventStore {
+  return new JsonlEventStore(':memory:');
 }
 
 describe('WorkflowCheckpoint', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let checkpoint: WorkflowCheckpoint;
 
   beforeEach(() => {
     db = createDb();
-    checkpoint = new WorkflowCheckpoint(db, { enableWal: false });
+    checkpoint = new WorkflowCheckpoint(db);
   });
 
   it('save 后 load 返回相同记录', () => {

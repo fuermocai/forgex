@@ -3,7 +3,7 @@
  *
  * 设计原则（与 benchmark/lib/harness.mjs 保持一致的取舍）：
  *   - 一个场景一个 mktemp 工作区，跑完即删；
- *   - 断言只看**可外部验证的证据**：文件内容、进程退出码、SQLite 记录、审计 JSONL；
+ *   - 断言只看**可外部验证的证据**：文件内容、进程退出码、JSONL 事件记录；
  *     不看模型自述文本，也不做输出相似度比对；
  *   - 不做进程内打桩：CLI 以子进程运行，走生产装配路径（loadConfig / Agent / Dispatcher）。
  */
@@ -12,7 +12,6 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { startFakeModel } from './fake-model.mjs';
 
 /** 场景断言失败（与脚手架自身异常区分） */
@@ -362,7 +361,7 @@ function writeConfig(art, baseUrl, scenario, liveModel) {
       ...security,
       auditLogPath: join(art, 'audit.jsonl'),
     },
-    session: { dbPath: join(art, 'sessions.db') },
+    session: { dbPath: join(art, 'events.jsonl') },
     agent: { maxIterations: 8, ...(liveModel ? { maxIterations: 16 } : {}) },
     ...(scenario.worktree
       ? { worktree: { root: scenario.worktreeRoot ?? join(art, 'worktrees') } }
@@ -465,7 +464,7 @@ export function parseJsonOutput(stdout) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 取证：SQLite / 审计 / 文件快照                                        */
+/* 取证：JSONL 事件 / 审计 / 文件快照                                   */
 /* ------------------------------------------------------------------ */
 
 function readDbPath(configPath) {
@@ -474,43 +473,43 @@ function readDbPath(configPath) {
 
 export function readDatabase(dbPath) {
   if (!existsSync(dbPath)) return { runs: [], steps: [], gates: [] };
-  const db = new DatabaseSync(dbPath, { readOnly: true });
-  try {
-    const tableExists = (name) =>
-      db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name) !== undefined;
-    const runs = tableExists('task_runs')
-      ? db.prepare('SELECT * FROM task_runs ORDER BY created_at ASC').all()
-      : [];
-    const steps = tableExists('step_results')
-      ? db.prepare('SELECT * FROM step_results ORDER BY id ASC').all()
-      : [];
-    const gates = tableExists('gate_results')
-      ? db.prepare('SELECT * FROM gate_results ORDER BY id ASC').all()
-      : [];
-    return { runs: toPlain(runs), steps: toPlain(steps), gates: toPlain(gates) };
-  } finally {
-    db.close();
+  const events = readEventLog(dbPath);
+  const runs = new Map();
+  const steps = new Map();
+  const gates = [];
+  for (const event of events) {
+    const data = event.data ?? {};
+    if (event.type === 'task.run.created') runs.set(data.run_id, { ...data });
+    if (event.type === 'task.run.updated') {
+      const run = runs.get(data.run_id);
+      if (run) Object.assign(run, data.patch ?? {});
+    }
+    if (event.type === 'task.step.upserted' || event.type === 'task.step.execution') {
+      const step = data.step ?? {};
+      steps.set(`${data.run_id}:${step.step_id}`, {
+        run_id: data.run_id,
+        ...step,
+        ...(typeof step.verification_passed === 'boolean'
+          ? { verification_passed: step.verification_passed ? 1 : 0 }
+          : {}),
+      });
+    }
+    if (event.type === 'task.gate.recorded') {
+      const result = data.result ?? {};
+      gates.push({ run_id: data.run_id, kind: data.kind, ...result, passed: result.passed ? 1 : 0 });
+    }
   }
+  return { runs: [...runs.values()].sort((left, right) => String(left.created_at).localeCompare(String(right.created_at))), steps: [...steps.values()], gates };
 }
 
-/** node:sqlite 返回的是无原型对象，统一转成普通对象便于 JSON 序列化 */
-function toPlain(rows) {
-  return rows.map((row) => ({ ...row }));
+function readEventLog(path) {
+  return readFileSync(path, 'utf8').split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line));
 }
 
 export function readAudit(configPath) {
-  const path = JSON.parse(readFileSync(configPath, 'utf8')).security.auditLogPath;
+  const path = JSON.parse(readFileSync(configPath, 'utf8')).session.dbPath;
   if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8')
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    .flatMap((line) => {
-      try {
-        return [JSON.parse(line)];
-      } catch {
-        return [];
-      }
-    });
+  return readEventLog(path).filter((event) => event.type === 'audit.recorded').map((event) => event.data.event);
 }
 
 /**

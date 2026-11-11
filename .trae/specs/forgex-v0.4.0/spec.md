@@ -64,7 +64,7 @@ v0.4.0 的目标是在不重写现有 Runtime 的前提下，增量补齐上述�
 - `WorkflowValidator`：校验 DAG 无环、强制节点存在、节点类型合法；
 - `WorkflowRegistry`：注册/查找工作流定义；
 - `WorkflowRunner`：编排执行，串行与依赖调度，超时/取消/重试，人工审批节点阻塞，中断恢复，条件分支，任务执行报告；
-- `WorkflowCheckpoint`：持久化工作流状态（复用 CheckpointManager 思路，用 node:sqlite）；
+- `WorkflowCheckpoint`：持久化工作流状态（复用 CheckpointManager 思路，写入 JSONL 事件流）；
 - 内置 6 个工作流：Bug Fix、Feature Development、Code Review、Refactoring、DevOps Diagnosis、Deployment Preparation；
 - 禁止无限循环（maxSteps 硬上限）；
 - 不允许跳过强制验证节点（如 Test、Review）。
@@ -86,7 +86,7 @@ v0.4.0 的目标是在不重写现有 Runtime 的前提下，增量补齐上述�
 - `ApprovalManager`（增强版）：四级风险（L0 只读 / L1 工作区低风险修改 / L2 敏感操作 / L3 高风险操作）；
 - `ApprovalPolicy`：可信配置决定权限，模型不可自行决定；
 - `ApprovalRequest`：绑定具体操作及参数，参数哈希用于变化检测；
-- `ApprovalStore`：持久化审批记录（node:sqlite）；
+- `ApprovalStore`：持久化审批记录（JSONL 事件流）；
 - `ApprovalAudit`：审批全字段审计（操作摘要、风险、目标环境、申请主体、审批主体、有效期）；
 - 支持单次审批、限定范围和有效期的审批；
 - 参数变化后重新审批；
@@ -175,7 +175,7 @@ v0.4.0 的目标是在不重写现有 Runtime 的前提下，增量补齐上述�
 
 ### AC-005：Workflow 检查点与恢复
 - **type**: rule
-- WorkflowCheckpoint 必须在每个节点状态变化时持久化到 SQLite。
+- WorkflowCheckpoint 必须在每个节点状态变化时追加到 JSONL 事件流。
 - 崩溃恢复后必须从最后一个未终态节点继续，已完成节点不重复执行。
 - 恢复前必须校验工作流定义版本与检查点兼容。
 
@@ -207,7 +207,7 @@ v0.4.0 的目标是在不重写现有 Runtime 的前提下，增量补齐上述�
 - **type**: rule
 - ApprovalRequest 必须绑定操作名、参数哈希、目标环境、有效期。
 - 参数哈希变化后已有审批自动失效，必须重新审批。
-- 审批记录必须持久化到 ApprovalStore（SQLite），包含操作摘要、风险级别、目标环境、申请主体、审批主体、有效期、决策时间。
+- 审批记录必须持久化到 ApprovalStore（JSONL 事件流），包含操作摘要、风险级别、目标环境、申请主体、审批主体、有效期、决策时间。
 
 ### AC-011：审批撤销与过期
 - **type**: rule
@@ -283,11 +283,11 @@ v0.4.0 的目标是在不重写现有 Runtime 的前提下，增量补齐上述�
 
 **假设**：
 - 运行环境已安装 Git（Git Worktree 功能依赖）；
-- Node.js >= 20（node:sqlite 可用）；
+- Node.js >= 20；
 - Rust 执行器已编译或可通过 cargo 编译；
 - 企业内网有 GitLab/Jenkins 实例（可选，不影响本地 Git 功能）。
 
 **开放问题**：
 1. OS 级沙箱在 Linux 上是否需要第一版就实现 bubblewrap 集成？（当前决定：第一版只做能力检测 + 拒绝不可信代码，bubblewrap 集成留到后续版本）
-2. ApprovalStore 是否需要与现有 SessionStore 共享 SQLite 数据库？（当前决定：独立数据库文件，避免耦合）
+2. ApprovalStore 是否需要与现有 SessionStore 共享 JSONL 事件流？（当前决定：共享事件存储，统一恢复与审计）
 3. CI/CD 适配器是否需要支持 GitHub Actions？（当前决定：GitHub 可选，优先 GitLab + Jenkins + 本地 Git）

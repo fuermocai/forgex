@@ -49,7 +49,7 @@ describe('配置加载', () => {
     expect(loaded.modelConfigured).toBe(false);
     expect(loaded.configPath).toBeNull();
     expect(loaded.config.security.workspaceRoots).toEqual([resolve(cwd)]);
-    expect(loaded.config.session.dbPath).toBe(resolve(cwd, '.forgex', 'sessions.db'));
+    expect(loaded.config.session.dbPath).toBe(resolve(cwd, '.forgex', 'events.jsonl'));
   });
 
   it('配置文件与环境变量合并，环境变量优先', async () => {

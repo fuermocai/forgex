@@ -83,7 +83,7 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
 
 ## 6. 审计
 
-审计事件（JSONL + SQLite）包含：
+审计事件与会话、任务和指标一起追加到 `.forgex/events.jsonl`，包含：
 
 ```json
 {"id":"a_...","ts":1730000000000,"type":"tool_call","sessionId":"s_...","callId":"call_1","tool":"edit_file","riskLevel":"write","input":{"path":"src/a.ts"}}
@@ -95,7 +95,7 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
 - 所有字符串值经过 `redactValue`：`apiKey`、`token`、`password`、`authorization`、`cookie`、`privateKey` 等键整值替换；`sk-...` 等字面量也替换。
 - `sessionId` **不脱敏**，用于把工具调用、审批与会话关联起来。
 - 单个 sink 失败不会中断其他 sink，也不会中断 Agent。
-- 审计文件默认位于 `.forgex/audit.jsonl`（已加入 `.gitignore`），部署时应设置文件权限。
+- 事件文件默认位于工作区 `.forgex/events.jsonl`（已加入 `.gitignore`），部署时应设置文件权限。
 
 ## 7. 密钥处理
 
@@ -188,7 +188,7 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
 4. **临时目录 / Git Worktree 不是 OS 沙箱。** 它们只做文件系统隔离，进程仍在同一用户权限下运行，网络正常、进程表正常、可执行文件路径正常。报告里 `category` 为 `workspace_isolation`，与 `os_isolation` 分开统计；`anyAvailable` 只看工作区隔离，不代表可跑不可信代码。
 5. **提示注入无法完全消除。** 防线是"即使模型被骗，也无法越权"，而不是"模型永远不会被骗"。
 6. **审计是本地文件。** 未实现远程不可篡改存储与签名；高合规场景应把审计文件转发到集中日志系统。
-7. **`node:sqlite` 为实验特性。** 数据库文件应限制在受控目录，避免被其他进程替换。
+7. **事件日志应限制在受控目录。** JSONL 文件包含会话与审计记录，避免被未授权进程读取或替换。
 8. **输出截断可能丢失证据。** 截断会标记 `truncated`，模型会被提示"内容已截断"，但不应把截断结果当作完整证据。
 
 

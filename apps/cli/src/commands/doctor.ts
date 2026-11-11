@@ -6,10 +6,10 @@
  */
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
 import { dirname } from 'node:path';
 import { stdout } from 'node:process';
 import { getMemory, listProcesses } from '@forgex/devops';
+import { SessionStore } from '@forgex/core';
 import { describeCapabilityReport, detectCapabilities, type SandboxCapabilityReport } from '@forgex/sandbox';
 import { createBuiltinTools, ToolRegistry } from '@forgex/tools';
 import { flagBool, flagString, type ParsedArgs } from '../args.js';
@@ -110,27 +110,27 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
       checks.push({ name: '工作区', status: 'fail', detail: `${root} 不存在或不可访问` });
     }
 
-    // 5. 审计目录
-    const auditDir = dirname(loaded.config.security.auditLogPath);
+    // 5. Shared event log directory (sessions, audit and task events)
+    const auditDir = dirname(loaded.config.session.dbPath);
     checks.push({
-      name: '审计目录',
+      name: '事件日志目录',
       status: existsSync(auditDir) ? 'ok' : 'warn',
       detail: existsSync(auditDir) ? auditDir : `${auditDir}（首次运行时创建）`,
     });
 
-    // 6. SQLite 会话库
-    const dbPath = loaded.config.session.dbPath;
-    if (!existsSync(dbPath)) {
-      checks.push({ name: '会话数据库', status: 'warn', detail: `${dbPath}（首次运行时创建）` });
+    // 6. JSONL 事件日志
+    const eventPath = loaded.config.session.dbPath;
+    if (!existsSync(eventPath)) {
+      checks.push({ name: '会话事件日志', status: 'warn', detail: `${eventPath}（首次运行时创建）` });
     } else {
       try {
-        const db = new DatabaseSync(dbPath, { readOnly: true });
-        const row = db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n?: number } | undefined;
-        db.close();
-        checks.push({ name: '会话数据库', status: 'ok', detail: `${dbPath}（${row?.n ?? 0} 个会话）` });
+        const store = new SessionStore(eventPath);
+        const count = store.listSessions(Number.MAX_SAFE_INTEGER).length;
+        store.close();
+        checks.push({ name: '会话事件日志', status: 'ok', detail: `${eventPath}（${count} 个会话）` });
       } catch (err) {
         checks.push({
-          name: '会话数据库',
+          name: '会话事件日志',
           status: 'fail',
           detail: err instanceof Error ? err.message : String(err),
         });

@@ -8,7 +8,6 @@
  *  - Memory：冲突保护；Session/Evidence：持久化恢复与清理。
  */
 
-import { DatabaseSync } from 'node:sqlite';
 
 /** 构造一个最小合法的 LoopResult（agent 假实现用） */
 function okLoopResult(text) {
@@ -107,9 +106,9 @@ export const suite = {
       id: 'REC-03',
       name: 'Planning checkpoint 保存后可完整恢复',
       async run(env) {
-        const db = new DatabaseSync(':memory:');
+        const events = new env.shared.JsonlEventStore(':memory:');
         try {
-          const checkpoint = new env.core.CheckpointManager(db);
+          const checkpoint = new env.core.CheckpointManager(events);
           const mgr = new env.core.PlanManager({ checkpoint });
           const plan = makePlan(env, mgr, ['步骤A', '步骤B']);
           // 推一个步骤到 completed：pending → ready → running → completed
@@ -123,7 +122,7 @@ export const suite = {
           env.expect(loaded.completed_step_ids.includes(plan.steps[0].step_id), '已完成步骤应被记录');
           env.expectEq(loaded.plan.steps.length, 2, '完整计划应可恢复');
         } finally {
-          db.close();
+          events.close();
         }
       },
     },

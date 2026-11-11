@@ -128,6 +128,33 @@ export class ContextManager {
     return this.compressionCount;
   }
 
+  get needsCompaction(): boolean { return this.estimatedTokens() > this.budgetTokens(); }
+
+  /** A bounded transcript of complete history preceding the current user input. */
+  compactionSource(maxChars = 48_000): { text: string; messageCount: number } | null {
+    const currentUser = this.history.findLastIndex((message) => message.role === 'user');
+    if (currentUser <= 0) return null;
+    const earlier = this.history.slice(0, currentUser);
+    const text = earlier.map((message) => {
+      const role = message.role === 'tool' ? `tool:${message.name ?? ''}` : message.role;
+      const calls = message.tool_calls?.map((call) => `${call.function.name}(${call.function.arguments})`).join('\n') ?? '';
+      return `${role}: ${message.content ?? ''}${calls ? `\n${calls}` : ''}`;
+    }).join('\n\n');
+    return { text: text.length > maxChars ? `[旧记录已截短]\n${text.slice(-maxChars)}` : text, messageCount: earlier.length };
+  }
+
+  /** Insert the compacted summary as a synthetic user context entry; raw messages stay in persistence. */
+  compactWithSummary(summary: string): boolean {
+    const currentUser = this.history.findLastIndex((message) => message.role === 'user');
+    if (currentUser <= 0 || !summary.trim()) return false;
+    this.history = [
+      { role: 'user', content: `[历史摘要（原始会话仍保存在事件日志中）]\n${summary.trim()}` },
+      ...this.history.slice(currentUser),
+    ];
+    this.compressionCount += 1;
+    return true;
+  }
+
   /** 可用输入预算（token） */
   budgetTokens(): number {
     return Math.max(512, this.contextWindow - this.maxOutputTokens - this.safetyMargin);
@@ -224,9 +251,14 @@ export class ContextManager {
       for (const message of working) {
         if (total() <= budget) break;
         if (!message.content) continue;
-        while (total() > budget && message.content.length > 16) {
-          const keep = Math.max(8, Math.floor(message.content.length / 2));
-          message.content = `${message.content.slice(0, keep)}\n…[truncated]`;
+        let content: string = message.content;
+        while (total() > budget && content.length > 16) {
+          // The marker itself is 12 chars. For short strings, halving plus the
+          // marker can grow the message and trap this loop above the 16-char guard.
+          const keep = Math.floor(content.length / 2);
+          const next: string = keep <= 4 ? '…[truncated]' : `${content.slice(0, keep)}\n…[truncated]`;
+          content = next.length < content.length ? next : '…[truncated]';
+          message.content = content;
           compressed = true;
         }
       }

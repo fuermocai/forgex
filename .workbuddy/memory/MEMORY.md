@@ -47,13 +47,13 @@
 
 - 核心模块 `apps/cli/src/task-run/review-worktree.ts` + `commands/task.ts`（list/show/diff/clean）。
 - worktree 是**工作区隔离**，不是 OS 沙箱；文档必须区分。脏仓库拒绝不 stash；clean 四重归属核对。
-- 新 SQLite 库必须先用 SessionStore 建 sessions 表再插 task_runs（外键），否则计划前失败无法落库。
+- 会话、任务运行与审计记录统一追加到 JSONL 事件流，避免多个存储之间的外键耦合。
 
 ## 任务闭环评测（eval/task）
 
 - 单一入口 `pnpm eval:task`；CI 用 `pnpm eval:task:ci`（红线即 exit 1，写 `eval/results/`，
   该目录在 `.gitignore`）。结果 JSON schema `forgex.task-eval/v1`。
-- 断言只认外部证据：文件内容、退出码、SQLite（`task_runs`/`step_results`/`gate_results`）、
+- 断言只认外部证据：文件内容、退出码、JSONL（任务运行/步骤/门禁事件）、
   审计 JSONL。**永远不要**用模型输出文本做成功判据。
 - 加新场景只改 `eval/task/scenarios/*.mjs` 并在 `index.mjs` 登记；harness 不认识具体场景。
 - 三类红线：`false_completed` / `forbidden_tool_executed` / `side_effect_after_denial`，
@@ -72,8 +72,6 @@
 - 硬约束：仓库脏（含未跟踪文件）拒绝，不 stash/reset；创建失败不回退原地执行；
   不自动合并/复制/删除；`task clean` 前必须核对 路径∈根目录、目录名==run-<runId>、
   `git worktree list` 归属，有未提交产物还要 `--force`。
-- 新库先建 SessionStore 再开 TaskRunStore（task_runs 有指向 sessions 的外键）。
-- 元数据列：`isolation` / `worktree_root` / `worktree_path` / `worktree_branch` / `base_commit`，
-  迁移用 `PRAGMA table_info` 增量 ALTER。
+- 会话与任务运行记录追加到共享事件流；worktree 字段保存在任务运行事件中，升级结构通过事件版本兼容。
 
 

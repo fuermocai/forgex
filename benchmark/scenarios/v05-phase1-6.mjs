@@ -11,7 +11,6 @@
  *
  * 每个场景对应一个真实的工程能力指标，全部确定性，无外部依赖。
  */
-import { DatabaseSync } from 'node:sqlite';
 
 export const suite = {
   name: 'v0.5',
@@ -78,8 +77,8 @@ export const suite = {
       name: '追溯链 trace-store 完整生命周期 + workflowRunId 预留',
       async run(env) {
         const { req } = env;
-        const db = new DatabaseSync(':memory:');
-        const store = new req.RequirementTraceStore(db);
+        const events = new env.shared.JsonlEventStore(':memory:');
+        const store = new req.RequirementTraceStore(events);
         const r = req.makeStructuredRequirement({
           original: 'x',
           parsed: { category: 'feature', summary: '', functionalReqs: [], nonFunctionalReqs: [] },

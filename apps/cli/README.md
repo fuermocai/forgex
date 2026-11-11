@@ -4,7 +4,7 @@ TUI-first 的 Coding + DevOps Agent。用自然语言让 Agent 读代码、改�
 
 ## 环境要求
 
-- Node.js **>= 22.13.0**（依赖内置 `node:sqlite`）
+- Node.js **>= 22.13.0**（依赖原生 fetch 与 AbortSignal.any）
 - Git（使用 `git_status` / `git_diff` 时需要）
 - 可选：ripgrep（`grep_search` 会优先使用；没有则回退到 Node 搜索）
 
@@ -103,7 +103,7 @@ forgex config                   # 查看最终生效配置（Key 脱敏）
 
 - 写文件、执行命令默认需要人工审批。
 - 审计日志写入 `~/.forgex/audit.jsonl`，敏感字段会脱敏。
-- 会话保存在 `~/.forgex/sessions.db`。
+- 会话、审计、指标与任务状态默认保存在当前工作区的 `.forgex/events.jsonl`。
 - 临时目录 / Git worktree 只隔离文件视图；Rust 执行器只提供超时、输出限额与进程树清理——
   都**不是** OS 沙箱。OS 级隔离（bubblewrap）目前仅 Linux 可用，需通过启动探针验证；
   其它平台或验证失败时，不可信代码执行（`trustLevel: untrusted`）一律拒绝，不降级、不静默裸跑。

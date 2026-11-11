@@ -47,7 +47,7 @@ import { createInterface } from 'node:readline/promises';
 import { stdin, stdout, stderr } from 'node:process';
 import { ForgeError, createLogger, type Logger } from '@forgex/shared';
 import { createProvider } from '@forgex/models';
-import { PlanManager, SessionStore, StepExecutor, TaskPlanner, type CheckpointRecord, type PlanManagerOptions, type StepExecResult, type TaskPlan } from '@forgex/core';
+import { PlanManager, StepExecutor, TaskPlanner, type CheckpointRecord, type PlanManagerOptions, type StepExecResult, type TaskPlan } from '@forgex/core';
 import type { ApprovalHandler } from '@forgex/security';
 import { flagBool, flagString, type ParsedArgs } from '../args.js';
 import { loadConfig } from '../config/load-config.js';
@@ -100,12 +100,8 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
     };
   }
 
-  // task_runs 有 `session_id → sessions(id)` 外键；全新数据库里若 sessions 表还不存在，
-  // 插入会直接报 "no such table: main.sessions"。先让 SessionStore 把 schema 建好，
-  // 这样"计划还没开始就拒绝/失败"的记录也能落库（例如脏工作区拒绝、invalid_plan）。
-  // --plan 不得创建目录、建表或迁移用户数据库；用独立内存库满足统一执行路径的依赖。
+  // --plan 不得创建目录或文件；其它运行的会话、任务和审计事件共用事件日志。
   const taskDbPath = planOnly ? ':memory:' : loaded.config.session.dbPath;
-  const sessionBootstrap = new SessionStore(taskDbPath);
   const store = new TaskRunStore(taskDbPath);
   const logger: Logger = createLogger({ level: 'error' });
   const configuredWorkspace = loaded.config.security.workspaceRoots[0] ?? options.cwd;
@@ -640,7 +636,6 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
     process.removeListener('SIGTERM', onSigterm);
     rl?.close();
     store.close();
-    sessionBootstrap.close();
     runtime?.close();
   }
 }

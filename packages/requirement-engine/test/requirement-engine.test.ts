@@ -10,7 +10,7 @@
  *   6. RequirementTraceStore CRUD。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import {
   makeStructuredRequirement,
   makeCriterion,
@@ -267,11 +267,11 @@ describe('RequirementAnalyzer', () => {
 });
 
 describe('RequirementTraceStore', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let store: RequirementTraceStore;
 
   beforeEach(() => {
-    db = new DatabaseSync(':memory:');
+    db = new JsonlEventStore(':memory:');
     store = new RequirementTraceStore(db);
   });
 

@@ -10,7 +10,7 @@
 
 ### 方式一：npm 全局安装（推荐）
 
-要求 **Node.js >= 22.13**（CLI 使用内置 `node:sqlite`）。
+要求 **Node.js >= 22.13**（CLI 使用原生 fetch 与 AbortSignal.any）。
 
 ```bash
 npm install -g forgex-agent
@@ -155,7 +155,7 @@ node apps/cli/dist/main.js task resume run_ab12cd34          # 安全恢复（�
 | --- | --- |
 | 自动继续 | 只有**从未开始**的步骤；已完成且验收通过的步骤直接跳过 |
 | 必须人工核对 | 中断时 `running` 的步骤（副作用结果未知）、声称完成但验收证据缺失的步骤、被取消/失败的步骤——模型**无权**替你把这些标成"完成" |
-| 快照即事实 | 计划完整快照（步骤/依赖/验收规则/状态）在每个状态变化时落 SQLite，带 schema 版本；损坏或旧版本快照拒绝恢复并给出诊断 |
+| 快照即事实 | 计划完整快照（步骤/依赖/验收规则/状态）在每个状态变化时追加到 JSONL 事件流，带 schema 版本；损坏或旧版本快照拒绝恢复并给出诊断 |
 | worktree 不猜测 | 恢复时校验 worktree 存在、目录名与 runId 匹配、路径归属；异常时拒绝恢复，不重建、不删除 |
 
 ### TUI 内命令
@@ -300,7 +300,7 @@ forgex/
 ### 任务闭环评测
 
 `pnpm eval:task` 在临时 Git 仓库里跑**真实 CLI**（本地假模型、零网络、零付费），
-判断"任务是否真的完成、状态是否报得对"——只看文件、退出码、SQLite 记录与审计日志，
+判断"任务是否真的完成、状态是否报得对"——只看文件、退出码、JSONL 事件记录与审计日志，
 不看模型自述。21 个场景覆盖计划校验、审批拒绝、超时/截断/取消、中断不重放、prompt injection
 与质量门禁取证；误报 completed、越权工具调用、拒绝后仍产生副作用会直接让 CI 失败。
 
@@ -355,9 +355,8 @@ pnpm publish:npm
   已知边界：仓库必须至少有一次提交；子模块 / sparse-checkout 未覆盖；Windows 下若 `core.autocrlf=true`，
   worktree 内的文件是 CRLF（`git` 的 diff 结论正确，但字节与源文件不同）。
 - OS 级沙箱仅 Linux（bubblewrap）提供，且必须通过真实探针；Windows / macOS 的 `trustLevel: untrusted` 与 `type: os_sandbox` 一律拒绝。详情见 `docs/SECURITY.md` 第 8 节。
-- `node:sqlite` 为 Node 22 实验特性，启动时会打印一次 `ExperimentalWarning`（不影响功能）。
 - 未内置树解析（tree-sitter）与向量检索，代码理解以文件 + ripgrep 为主。
-- v0.5 的 ModelRouter 和 EngineeringKnowledgeStore 生产适配器（真实 prompt 模板、SQLite WAL 持久化）将在 v0.5.1 交付。
+- v0.5 的 ModelRouter 和 EngineeringKnowledgeStore 生产适配器（真实 prompt 模板、JSONL 持久化）将在 v0.5.1 交付。
 
 ---
 

@@ -32,7 +32,7 @@ describe('loadConfig', () => {
     expect(loaded.config.model.model).toBe('local-model');
     expect(loaded.config.security.mode).toBe('standard');
     expect(loaded.config.security.workspaceRoots).toEqual([resolve(dir)]);
-    expect(loaded.config.session.dbPath).toBe(resolve(dir, '.forgex', 'sessions.db'));
+    expect(loaded.config.session.dbPath).toBe(resolve(dir, '.forgex', 'events.jsonl'));
     expect(loaded.config.security.auditLogPath).toBe(resolve(dir, '.forgex', 'audit.jsonl'));
   });
 
@@ -195,11 +195,21 @@ describe('loadConfig', () => {
   it('展开 ~ 路径', async () => {
     await writeFile(
       join(dir, 'forgex.config.json'),
-      JSON.stringify({ session: { dbPath: '~/.forgex/test-sessions.db' } }),
+      JSON.stringify({ session: { dbPath: '~/.forgex/test-events.jsonl' } }),
       'utf8',
     );
     const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
-    expect(loaded.config.session.dbPath).toBe(join(homedir(), '.forgex', 'test-sessions.db'));
+    expect(loaded.config.session.dbPath).toBe(join(homedir(), '.forgex', 'test-events.jsonl'));
+  });
+
+  it('把旧 .db 配置路径切换到同名 JSONL 路径', async () => {
+    await writeFile(
+      join(dir, 'forgex.config.json'),
+      JSON.stringify({ session: { dbPath: join(dir, 'sessions.db') } }),
+      'utf8',
+    );
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+    expect(loaded.config.session.dbPath).toBe(join(dir, 'sessions.jsonl'));
   });
 
   it('显式配置文件不存在时报 CONFIG_INVALID', () => {

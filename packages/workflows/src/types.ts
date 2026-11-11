@@ -4,7 +4,7 @@
  * 设计原则：
  *   1. 纯类型文件，零外部运行时依赖（只 import @forgex/shared 的 uuid 工具）；
  *   2. 所有字段可 JSON 序列化（无 Date 对象、无 Map、无 undefined），
- *      便于 WorkflowCheckpoint 用 node:sqlite 直接持久化；
+ *      便于 WorkflowCheckpoint 直接追加到 JSONL 事件流；
  *   3. WorkflowNodeStatus 提供显式状态机转移表 + 验证函数，
  *      后续模块统一调用，避免各处手写 if/switch 产生不一致；
  *   4. 复用 v0.3.0 TaskStep 的设计思路，但不直接继承——工作流节点是
@@ -268,7 +268,7 @@ export interface WorkflowExecutionReport {
 }
 
 /* ------------------------------------------------------------------ */
-/* WorkflowCheckpointRecord（可 JSON 序列化，直接落 SQLite）            */
+/* WorkflowCheckpointRecord（可 JSON 序列化，追加到 JSONL 事件流）      */
 /* ------------------------------------------------------------------ */
 
 /**

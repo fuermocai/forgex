@@ -71,7 +71,7 @@
 ### T1.7 WorkflowCheckpoint
 - **AC**: AC-005
 - **优先级**: high
-- **描述**: 在 `packages/workflows/src/runner/checkpoint.ts` 实现 SQLite 检查点持久化（复用 v0.3.0 CheckpointManager 模式：DatabaseSync + WAL + busy_timeout）。save(workflowId, snapshot)、load(workflowId)、delete(workflowId)。
+- **描述**: 在 `packages/workflows/src/runner/checkpoint.ts` 实现 JSONL 事件检查点持久化（复用共享事件存储）。save(workflowId, snapshot)、load(workflowId)、delete(workflowId)。
 - **依赖**: T1.2
 - **测试要求**:
   - rule: save 后 load 返回相同快照。
@@ -222,7 +222,7 @@
 ### T3.5 ApprovalStore
 - **AC**: AC-010, AC-011
 - **优先级**: high
-- **描述**: 在 `packages/approval/src/store/approval-store.ts` 实现 SQLite 持久化：create(request)、get(id)、listByScope(scopeHash)、updateStatus(id, status)、expireOutdated()。
+- **描述**: 在 `packages/approval/src/store/approval-store.ts` 实现 JSONL 事件持久化：create(request)、get(id)、listByScope(scopeHash)、updateStatus(id, status)、expireOutdated()。
 - **依赖**: T3.2, T3.4
 - **测试要求**:
   - rule: create 后 get 返回相同记录。
@@ -372,7 +372,7 @@
 ### T5.5 AuditEventStore
 - **AC**: AC-016
 - **优先级**: high
-- **描述**: 在 `packages/observability/src/audit/audit-event-store.ts` 实现：扩展 AuditLogger，支持事件查询（按 sessionId/agentId/tool 过滤）、事件存储（SQLite 或 JSONL）。所有事件通过 redactValue 脱敏。
+- **描述**: 在 `packages/observability/src/audit/audit-event-store.ts` 实现：扩展 AuditLogger，支持事件查询（按 sessionId/agentId/tool 过滤）、事件存储（JSONL）。所有事件通过 redactValue 脱敏。
 - **依赖**: T5.1
 - **测试要求**:
   - rule: 查询按 sessionId 过滤正确。

@@ -9,7 +9,7 @@
  *   5. RecoveryManager 集成。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { JsonlEventStore } from '@forgex/shared';
 import { CheckpointStore } from '../src/checkpoints/checkpoint-store.js';
 import { RecoveryPlanner } from '../src/coordinator/recovery-planner.js';
 import { RollbackCoordinator } from '../src/coordinator/rollback-coordinator.js';
@@ -28,11 +28,11 @@ function makeEnv(overrides: Partial<EnvironmentSnapshot> = {}): EnvironmentSnaps
 }
 
 describe('CheckpointStore', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let store: CheckpointStore;
 
   beforeEach(() => {
-    db = new DatabaseSync(':memory:');
+    db = new JsonlEventStore(':memory:');
     store = new CheckpointStore(db);
   });
 
@@ -255,12 +255,12 @@ describe('RecoveryVerifier', () => {
 });
 
 describe('RecoveryManager', () => {
-  let db: DatabaseSync;
+  let db: JsonlEventStore;
   let store: CheckpointStore;
   let manager: RecoveryManager;
 
   beforeEach(() => {
-    db = new DatabaseSync(':memory:');
+    db = new JsonlEventStore(':memory:');
     store = new CheckpointStore(db);
     manager = new RecoveryManager({
       checkpoints: store,

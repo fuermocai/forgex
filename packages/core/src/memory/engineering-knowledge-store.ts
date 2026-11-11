@@ -58,7 +58,7 @@ export interface CreateKnowledgeInput {
 /**
  * 工程知识存储。
  *
- * 实现：先保持纯内存 + 可序列化接口，Phase 6 后续可接 SQLite 持久化。
+ * 实现：保持纯内存 + 可序列化接口；持久化由共享 JSONL 事件层负责。
  * 与 MemoryStore 的桥接：写入时同步创建 MemoryEntry（scope=project, kind=fact）。
  */
 export class EngineeringKnowledgeStore {

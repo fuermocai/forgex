@@ -20,7 +20,7 @@ import { validateMemoryInput } from './validator.js';
 import type { CreateMemoryInput, MemoryEntry } from './types.js';
 
 export interface MemoryManagerOptions {
-  /** SQLite 路径，':memory:' 为内存库（测试用） */
+  /** JSONL 事件文件路径，':memory:' 表示仅存内存（测试用） */
   dbPath: string;
 }
 
