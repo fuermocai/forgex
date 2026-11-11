@@ -108,6 +108,26 @@ Agent 默认持续运行，直到模型结束或用户取消。需要限制模�
 
 命令工具接收程序名和参数数组，不接受整段 shell 命令。Windows 下可直接调用 `pnpm`、`npm` 等命令，ForgeX 会在 PATH 中没有原生可执行文件时解析对应的 `.cmd` / `.bat` 包装器；解释器内联代码（如 `node -p`、`node -e`）仍会被安全策略拒绝，请将脚本保存为工作区文件后运行。
 
+### LSP 代码智能
+
+可在配置文件中按语言服务器注册 LSP。服务器只在 Agent 获批调用 `lsp` 工具时启动，支持诊断、文档符号、定义和引用；服务器命令必须是本机已安装的可执行程序。Windows 下 `.cmd` 包装器也会自动解析。
+
+```json
+{
+  "tools": {
+    "languageServers": [
+      {
+        "id": "typescript",
+        "extensions": [".ts", ".tsx", ".js", ".jsx"],
+        "languageId": "typescript",
+        "command": "typescript-language-server",
+        "args": ["--stdio"]
+      }
+    ]
+  }
+}
+```
+
 启动：
 
 ```powershell

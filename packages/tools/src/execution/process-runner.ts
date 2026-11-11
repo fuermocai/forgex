@@ -54,7 +54,8 @@ const WINDOWS_SHIM = /\.(cmd|bat)$/i;
  */
 const CMD_UNSAFE_CHARS = /[&|<>^%"!\r\n\t]/;
 
-interface Launch {
+/** Normalized child-process launch options shared with long-lived protocol clients. */
+export interface ProcessLaunch {
   command: string;
   args: string[];
   windowsVerbatimArguments: boolean;
@@ -74,7 +75,8 @@ interface Launch {
  *   - 参数逐个加双引号并由 `windowsVerbatimArguments` 原样传递；
  *   - 含 cmd 元字符（& | < > ^ % " ! 等）的参数直接拒绝，避免二次解析注入。
  */
-function resolveLaunch(program: string, args: readonly string[]): Launch {
+/** Resolves Windows command shims and validates arguments before spawning. */
+export function resolveLaunch(program: string, args: readonly string[]): ProcessLaunch {
   if (process.platform === 'win32' && !WINDOWS_SHIM.test(program) && !/[\\/.]/.test(program)) {
     const shimPath = findWindowsShim(program);
     if (shimPath) return resolveLaunch(shimPath, args);

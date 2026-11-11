@@ -86,7 +86,10 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
 
   const provider = createProvider(config.model, { logger });
   // v0.2.0：根据 PolicySettings.remoteHosts 条件注册 ssh_inspect
-  const registry = new ToolRegistry(createBuiltinTools({ remoteHosts: settings.remoteHosts }));
+  const registry = new ToolRegistry(createBuiltinTools({
+    remoteHosts: settings.remoteHosts,
+    languageServers: config.tools.languageServers,
+  }));
 
   // 工具的默认 cwd 必须是授权工作区根目录，而不是进程 cwd：
   // 否则用户在仓库外部启动 CLI 时，所有相对路径都会被判定为越界。

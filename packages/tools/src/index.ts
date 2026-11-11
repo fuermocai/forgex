@@ -20,10 +20,12 @@ import { createRunCommandTool } from './execution/run-command.js';
 import { createSshInspectTool } from './system/ssh-inspect.js';
 import { createCorrelateCodeRuntimeTool } from './system/correlate-code-runtime.js';
 import { createHybridSearchTool } from './search/hybrid-search-tool.js';
+import { createLspTool } from './lsp/lsp-tool.js';
+import type { LspServerConfig } from './lsp/lsp-client.js';
 
 export * from './registry/tool-registry.js';
-export { runProcess, killTree } from './execution/process-runner.js';
-export type { ProcessSpec, ProcessResult } from './execution/process-runner.js';
+export { runProcess, killTree, resolveLaunch } from './execution/process-runner.js';
+export type { ProcessSpec, ProcessResult, ProcessLaunch } from './execution/process-runner.js';
 export { runViaExecutor, resolveExecutorBinary } from './execution/executor-client.js';
 export type { ExecutorSpec, ExecutorResult } from './execution/executor-client.js';
 export { createReadFileTool } from './coding/read-file.js';
@@ -42,6 +44,8 @@ export { createRunCommandTool } from './execution/run-command.js';
 export { createSshInspectTool } from './system/ssh-inspect.js';
 export { createCorrelateCodeRuntimeTool } from './system/correlate-code-runtime.js';
 export { createHybridSearchTool } from './search/hybrid-search-tool.js';
+export { createLspTool } from './lsp/lsp-tool.js';
+export { LspClient, type LspServerConfig, type LspPosition } from './lsp/lsp-client.js';
 export { hybridSearch } from './search/hybrid-search.js';
 export { walkTextFiles } from './search/walk.js';
 export type {
@@ -63,8 +67,13 @@ import type { RemoteHostConfig } from '@forgex/shared';
  *   只有当 options.remoteHosts 非空时才注册 ssh_inspect，
  *   否则不把它的 JSON Schema 发给模型——避免浪费 token 并诱导模型反复尝试未配置的功能。
  */
-export function createBuiltinTools(options?: { remoteHosts?: readonly RemoteHostConfig[] }): RegisteredTool[] {
+export function createBuiltinTools(options?: {
+  remoteHosts?: readonly RemoteHostConfig[];
+  languageServers?: readonly LspServerConfig[];
+}): RegisteredTool[] {
   const hasRemoteHosts = (options?.remoteHosts?.length ?? 0) > 0;
+  const languageServers = options?.languageServers ?? [];
+  const hasLanguageServers = languageServers.length > 0;
   const tools: RegisteredTool[] = [
     createReadFileTool(),
     createListDirectoryTool(),
@@ -85,6 +94,7 @@ export function createBuiltinTools(options?: { remoteHosts?: readonly RemoteHost
     createCorrelateCodeRuntimeTool(),
     // v0.3.0：三层混合检索（关键词+结构+语义，全离线，无条件注册）
     createHybridSearchTool(),
+    ...(hasLanguageServers ? [createLspTool(languageServers)] : []),
   ];
   return tools as unknown as RegisteredTool[];
 }

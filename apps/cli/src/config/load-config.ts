@@ -16,6 +16,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { ForgeError, createLogger, type Logger, type PermissionMode, type RemoteHostConfig } from '@forgex/shared';
 import type { ModelConfig } from '@forgex/models';
+import type { LspServerConfig } from '@forgex/tools';
 import { PROVIDERS } from './providers.js';
 import { parsePermissionMode, permissionModeList } from './permission-mode.js';
 
@@ -72,6 +73,18 @@ const AgentSchema = z.object({
   maxConcurrency: z.number().int().min(1).max(8).default(3),
 });
 
+const LanguageServerSchema = z.object({
+  id: z.string().min(1).max(64),
+  extensions: z.array(z.string().startsWith('.')).min(1),
+  languageId: z.string().min(1).max(64),
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+});
+
+const ToolsSchema = z.object({
+  languageServers: z.array(LanguageServerSchema).default([]),
+});
+
 /**
  * 可审阅 Git worktree（v0.5.6）。
  *
@@ -89,6 +102,7 @@ const ConfigSchema = z.object({
   session: SessionSchema.default({}),
   agent: AgentSchema.default({}),
   worktree: WorktreeSchema.default({}),
+  tools: ToolsSchema.default({}),
 });
 
 export type FileConfig = z.input<typeof ConfigSchema>;
@@ -111,6 +125,7 @@ export interface ResolvedConfig {
   session: { dbPath: string };
   agent: { maxIterations?: number; maxConcurrency: number };
   worktree: { root: string };
+  tools: { languageServers: LspServerConfig[] };
 }
 
 export interface LoadedConfig {
@@ -301,6 +316,7 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
         maxConcurrency: value.agent.maxConcurrency,
       },
       worktree: { root: resolveWorktreeRoot(value.worktree.root, cwd, env) },
+      tools: { languageServers: value.tools.languageServers },
     },
     configPath,
     sources,
