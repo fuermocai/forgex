@@ -14,20 +14,21 @@ import type { ApprovalRequest } from '@forgex/shared';
 import type { ApprovalHandler } from '@forgex/security';
 
 export class ApprovalBridge {
-  private resolver: ((approved: boolean) => void) | null = null;
+  private active: { request: ApprovalRequest; resolve: (approved: boolean) => void } | null = null;
+  private readonly pending: Array<{ request: ApprovalRequest; resolve: (approved: boolean) => void }> = [];
   private queued: boolean | null = null;
   private listener: ((request: ApprovalRequest) => void) | null = null;
 
   /** 交给 ApprovalManager 的回调 */
   readonly handler: ApprovalHandler = async (request: ApprovalRequest): Promise<boolean> => {
-    this.listener?.(request);
-    if (this.queued !== null) {
+    if (this.active === null && this.pending.length === 0 && this.queued !== null) {
       const value = this.queued;
       this.queued = null;
       return value;
     }
-    return new Promise<boolean>((resolve) => {
-      this.resolver = resolve;
+    return new Promise<boolean>((resolvePromise) => {
+      this.pending.push({ request, resolve: resolvePromise });
+      this.showNext();
     });
   };
 
@@ -41,10 +42,11 @@ export class ApprovalBridge {
 
   /** UI 在用户按下 y/n 后调用 */
   respond(approved: boolean): void {
-    if (this.resolver) {
-      const resolve = this.resolver;
-      this.resolver = null;
-      resolve(approved);
+    if (this.active) {
+      const active = this.active;
+      this.active = null;
+      active.resolve(approved);
+      this.showNext();
       return;
     }
     this.queued = approved;
@@ -52,6 +54,16 @@ export class ApprovalBridge {
 
   /** 会话取消时按拒绝处理，避免 Agent 永久挂起 */
   cancel(): void {
-    this.respond(false);
+    this.active?.resolve(false);
+    this.active = null;
+    for (const pending of this.pending.splice(0)) pending.resolve(false);
+    this.queued = null;
+  }
+
+  private showNext(): void {
+    if (this.active || this.pending.length === 0) return;
+    this.active = this.pending.shift() ?? null;
+    if (!this.active) return;
+    this.listener?.(this.active.request);
   }
 }

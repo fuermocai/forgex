@@ -282,6 +282,7 @@ export class ToolDispatcher {
 
       // 7. 执行（超时/取消都会终止等待）
       const ctx: ToolContext = {
+        sessionId,
         workspaceRoot: this.settings.workspaceRoots[0] ?? this.cwd,
         cwd: this.cwd,
         signal,

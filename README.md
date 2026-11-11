@@ -100,9 +100,11 @@ cargo build --release --manifest-path crates/executor/Cargo.toml
     "requireApprovalForWrite": true,
     "requireApprovalForExecute": true
   },
-  "agent": { "maxConcurrency": 3 }
+  "agent": { "maxConcurrency": 3, "subagentMaxConcurrency": 3 }
 }
 ```
+
+`subagentMaxConcurrency` 控制 `delegate_task` 的并发数，默认 `3`，最大 `32`；设为 `0` 表示不设并发上限。`delegate_task` 为每项工作创建基于派发时 Git 快照的独立 worktree，返回 patch 预览并将完整 patch 默认保存在 `.forgex/subagents/`（与事件日志同目录），不会自动合并。Git worktree 仅隔离工作目录，不是 OS 沙箱。
 
 Agent 默认持续运行，直到模型结束或用户取消。需要限制模型请求次数时，可在 `agent` 中显式设置 `"maxIterations": 20`，或设置环境变量 `FORGEX_MAX_ITERATIONS=20`；达到该上限会以未完成状态返回。
 
@@ -299,7 +301,7 @@ forgex/
 │   ├── shared                        # 错误、日志、Token、脱敏、协议
 │   ├── models                        # OpenAI-compatible Provider + ModelRouter (v0.5)
 │   ├── security                      # Policy / Workspace / Command Guard、审批、审计
-│   ├── tools                         # 工具注册表 + 14 个内置工具
+│   ├── tools                         # 工具注册表 + 内置工具（delegate_task 在会话运行时注入）
 │   ├── workflows                     # 状态机、流程注册、checkpoint
 │   ├── core                          # Agent Loop / Task Planner / Memory / Sub-Agent / Event Bus / Engineering Knowledge (v0.5)
 │   ├── sandbox                       # workspace / resource / capability

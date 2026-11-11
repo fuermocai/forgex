@@ -22,6 +22,10 @@ import { createCorrelateCodeRuntimeTool } from './system/correlate-code-runtime.
 import { createHybridSearchTool } from './search/hybrid-search-tool.js';
 import { createLspTool } from './lsp/lsp-tool.js';
 import type { LspServerConfig } from './lsp/lsp-client.js';
+import { createDelegateTaskTool, type DelegateTaskExecutor } from './delegation/delegate-task.js';
+
+export { createDelegateTaskTool } from './delegation/delegate-task.js';
+export type { DelegateTaskInput, DelegateTaskResult, DelegateTaskBatchResult, DelegateTaskExecutor } from './delegation/delegate-task.js';
 
 export * from './registry/tool-registry.js';
 export { runProcess, killTree, resolveLaunch } from './execution/process-runner.js';
@@ -70,6 +74,7 @@ import type { RemoteHostConfig } from '@forgex/shared';
 export function createBuiltinTools(options?: {
   remoteHosts?: readonly RemoteHostConfig[];
   languageServers?: readonly LspServerConfig[];
+  delegateTask?: DelegateTaskExecutor;
 }): RegisteredTool[] {
   const hasRemoteHosts = (options?.remoteHosts?.length ?? 0) > 0;
   const languageServers = options?.languageServers ?? [];
@@ -95,6 +100,7 @@ export function createBuiltinTools(options?: {
     // v0.3.0：三层混合检索（关键词+结构+语义，全离线，无条件注册）
     createHybridSearchTool(),
     ...(hasLanguageServers ? [createLspTool(languageServers)] : []),
+    ...(options?.delegateTask ? [createDelegateTaskTool(options.delegateTask)] : []),
   ];
   return tools as unknown as RegisteredTool[];
 }

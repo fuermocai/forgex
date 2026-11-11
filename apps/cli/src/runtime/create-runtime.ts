@@ -19,6 +19,7 @@ import {
 import { ToolRegistry, createBuiltinTools } from '@forgex/tools';
 import { Agent, SessionStore, type ForgeExtension } from '@forgex/core';
 import type { LoadedConfig, ResolvedConfig } from '../config/load-config.js';
+import { SubagentManager } from './subagent-manager.js';
 
 export interface CreateRuntimeOptions {
   cwd: string;
@@ -85,17 +86,29 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
   });
 
   const provider = createProvider(config.model, { logger });
+  let agent: Agent;
+  const subagents = new SubagentManager({
+    config,
+    settings,
+    getProvider: () => agent.currentProvider,
+    approvals,
+    audit,
+    store,
+    logger,
+    ...(options.extensions ? { extensions: options.extensions } : {}),
+  });
   // v0.2.0：根据 PolicySettings.remoteHosts 条件注册 ssh_inspect
   const registry = new ToolRegistry(createBuiltinTools({
     remoteHosts: settings.remoteHosts,
     languageServers: config.tools.languageServers,
+    delegateTask: subagents.execute,
   }));
 
   // 工具的默认 cwd 必须是授权工作区根目录，而不是进程 cwd：
   // 否则用户在仓库外部启动 CLI 时，所有相对路径都会被判定为越界。
   const workspaceCwd = settings.workspaceRoots[0] ?? cwd;
 
-  const agent = new Agent({
+  agent = new Agent({
     provider,
     registry,
     settings,

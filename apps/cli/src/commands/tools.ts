@@ -18,7 +18,8 @@ export function toolsCommand(): number {
     stdout.write(`  ${tool.description.split('\n')[0]}\n`);
   }
   stdout.write(
-    '\n说明：风险等级决定默认权限策略；execute 级命令默认需要人工审批，privileged 级默认拒绝。\n',
+    '\n说明：风险等级决定默认权限策略；execute 级命令默认需要人工审批，privileged 级默认拒绝。\n' +
+      '此列表不包含需要会话运行时执行器注入的工具。\n',
   );
   return 0;
 }

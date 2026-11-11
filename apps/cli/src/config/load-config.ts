@@ -71,6 +71,8 @@ const AgentSchema = z.object({
   /** 未配置时不因模型请求次数截断；可通过 FORGEX_MAX_ITERATIONS 显式设置 */
   maxIterations: z.number().int().min(1).optional(),
   maxConcurrency: z.number().int().min(1).max(8).default(3),
+  /** 子 Agent 并发数；0 表示不设并发上限。 */
+  subagentMaxConcurrency: z.number().int().min(0).max(32).default(3),
 });
 
 const LanguageServerSchema = z.object({
@@ -123,7 +125,7 @@ export interface ResolvedConfig {
     remoteHosts: RemoteHostConfig[];
   };
   session: { dbPath: string };
-  agent: { maxIterations?: number; maxConcurrency: number };
+  agent: { maxIterations?: number; maxConcurrency: number; subagentMaxConcurrency: number };
   worktree: { root: string };
   tools: { languageServers: LspServerConfig[] };
 }
@@ -314,6 +316,7 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
       agent: {
         ...(value.agent.maxIterations !== undefined ? { maxIterations: value.agent.maxIterations } : {}),
         maxConcurrency: value.agent.maxConcurrency,
+        subagentMaxConcurrency: value.agent.subagentMaxConcurrency,
       },
       worktree: { root: resolveWorktreeRoot(value.worktree.root, cwd, env) },
       tools: { languageServers: value.tools.languageServers },

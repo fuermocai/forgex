@@ -712,14 +712,14 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
     // 审批优先：此时普通输入被屏蔽
     if (approval) {
       if (char.toLowerCase() === 'y') {
-        bridge.respond(true);
         setApproval(null);
+        bridge.respond(true);
         push('notice', '已批准');
         return;
       }
       if (char.toLowerCase() === 'n' || key.escape) {
-        bridge.respond(false);
         setApproval(null);
+        bridge.respond(false);
         push('notice', '已拒绝');
         return;
       }

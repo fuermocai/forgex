@@ -114,6 +114,8 @@ export interface ToolResult<T = JsonValue> {
 
 /** 工具执行上下文（由调度器注入，工具不得自行创建） */
 export interface ToolContext {
+  /** 当前调用所属会话，用于将委派任务关联到父会话。 */
+  sessionId: string;
   /** 已解析（realpath）的授权工作区根目录 */
   workspaceRoot: string;
   /** 当前工作目录，必须在 workspaceRoot 之内 */

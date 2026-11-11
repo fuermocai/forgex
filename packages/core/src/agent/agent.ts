@@ -56,10 +56,14 @@ export interface AgentOptions {
   store?: SessionStore;
   /** 指定会话 id 时尝试恢复该会话 */
   sessionId?: string;
+  /** 子会话的父会话 id。 */
+  parentSessionId?: string;
   /** 相对路径基准与工具默认 cwd */
   cwd?: string;
   /** 覆盖默认系统提示词（一般不需要） */
   systemPrompt?: string;
+  /** 在默认系统提示词后追加受信任的运行时约束。 */
+  systemPromptSuffix?: string;
   maxIterations?: number;
   maxConcurrency?: number;
   logger?: Logger;
@@ -133,24 +137,25 @@ export class Agent {
           id: this.sessionId,
           workspace: workspaceRoot,
           model: options.provider.config.model,
+          ...(options.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
         });
       } else {
         restored = this.store.getMessages(this.sessionId);
       }
     }
 
-    const systemPrompt =
-      options.systemPrompt ??
-      buildSystemPrompt({
+    const systemPrompt = options.systemPrompt ?? buildSystemPrompt({
         workspaceRoot,
         permissionMode: options.settings.mode,
         toolNames: options.registry.names(),
         platform: process.platform,
       });
-    this.baseSystemPrompt = systemPrompt;
+    this.baseSystemPrompt = options.systemPromptSuffix
+      ? `${systemPrompt}\n\n${options.systemPromptSuffix}`
+      : systemPrompt;
 
     this.context = new ContextManager({
-      systemPrompt,
+      systemPrompt: this.baseSystemPrompt,
       contextWindow: options.provider.config.contextWindow,
       maxOutputTokens: options.provider.config.maxOutputTokens,
     });
@@ -339,6 +344,11 @@ export class Agent {
   /** 模型名称（供 UI 展示） */
   get modelName(): string {
     return this.provider.config.model;
+  }
+
+  /** 当前使用的模型 Provider，供运行时创建继承模型的子 Agent。 */
+  get currentProvider(): ModelProvider {
+    return this.provider;
   }
 
   /** 当前权限模式（计划模式开启时为 readonly） */
