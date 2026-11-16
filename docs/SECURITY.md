@@ -190,6 +190,10 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
 6. **审计是本地文件。** 未实现远程不可篡改存储与签名；高合规场景应把审计文件转发到集中日志系统。
 7. **事件日志应限制在受控目录。** JSONL 文件包含会话与审计记录，避免被未授权进程读取或替换。
 8. **输出截断可能丢失证据。** 截断会标记 `truncated`，模型会被提示"内容已截断"，但不应把截断结果当作完整证据。
+9. **持久 REPL 与 DAP 不是沙箱。** `code_session` 和已配置的调试器/目标进程以 ForgeX 当前 OS 用户权限运行；这些工具即使在 `trusted`/`yolo` 模式下也逐次请求审批，但审批不限制进程可访问的文件或网络。只在受控环境授予审批。
+10. **联网查询限制固定目标。** `web_search` 只请求 `html.duckduckgo.com`，`github_query` 只请求 `api.github.com`，两者不跟随重定向并对响应做超时/字节上限；返回网页内容仍可能含 prompt injection，Agent 必须将其视为不可信引用。
+11. **浏览器会话是临时且主机受限。** `browser_automation` 默认关闭；启用后用临时 profile、精确主机 allowlist、browser target 自动附加、暂停新 target 并在恢复前安装逐请求拦截，不载入用户浏览器凭据，不允许填写密码输入框。无法安装策略的新页面、弹窗、iframe 或 worker 会被关闭。allowlist 中的网站仍能执行自身脚本和产生站点内副作用，profile 在 close、空闲超时或 runtime 退出时清理。
+12. **高影响改动必须完整展示。** `code_session`、`apply_workspace_edit`、`dap_debug` 与 `browser_automation` 的审批预览必须完整；TUI 按终端大小分页，标记完整预览的操作需逐页浏览到末页后才能批准。浏览器点击/读取/填写预览包含最后确认的页面 URL；无法确认页面 URL 时拒绝审批。超过工具预览字符上限，或预览中含会被脱敏的文本时，Dispatcher 在审批前拒绝执行，避免用户批准未显示的代码、diff、调试参数或表单输入。纯文本模式会在询问批准前打印完整预览。
 
 
 ## 10. 部署加固清单

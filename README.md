@@ -106,6 +106,40 @@ cargo build --release --manifest-path crates/executor/Cargo.toml
 
 `subagentMaxConcurrency` 控制 `delegate_task` 的并发数，默认 `3`，最大 `32`；设为 `0` 表示不设并发上限。`delegate_task` 为每项工作创建基于派发时 Git 快照的独立 worktree，返回 patch 预览并将完整 patch 默认保存在 `.forgex/subagents/`（与事件日志同目录），不会自动合并。Git worktree 仅隔离工作目录，不是 OS 沙箱。
 
+本地 Agent Hub 可在父任务运行时用 `/workers` 查看 worker 状态和用量；`/worker <id>` 查看摘要，只有显式加 `transcript` 才会读取并显示完整对话。`/steer <id> <指令>`、`/cancel-worker <id>`、`/retry-worker <id>` 与 `/wait-worker <id>` 控制当前会话的 worker。重试会创建新的 attempt 和隔离 worktree，产物仍需人工审阅。
+
+Advisor 默认关闭。启用后可在每轮检查 Agent 的方案、工具调用、工具结果和最终答复；只提供只读意见，超时或模型输出无效时发出提醒并继续。可指定 `modelId`，或使用 `reasoning` 角色模型：
+
+```json
+{
+  "advisor": {
+    "enabled": true,
+    "modelId": "reasoner",
+    "stages": ["plan", "tools", "results", "final"],
+    "timeoutMs": 5000,
+    "maxChecksPerTurn": 4,
+    "maxInterventionsPerTurn": 1
+  }
+}
+```
+
+`modelId` 必须指向已配置的模型；省略时优先使用 reasoning 角色/能力模型，找不到时回退到当前默认模型。Advisor 不会收到工具声明，也不能更改路由或控制 worker。
+
+项目记忆默认开启并按授权工作区隔离，默认文件是 ForgeX 启动目录下的 `.forgex/memory.jsonl`；设置 `memory.enabled=false` 可完全关闭并且不读写记忆文件，召回可以单独关闭，自动保存默认关闭。会话中以 `记住：...` 或 `remember: ...` 开头的明确陈述会在轮次结束时进入待审核候选，不会直接进入长期记忆。`autoSave` 设为 `true` 也会逐条请求审批：
+
+```json
+{
+  "memory": {
+    "enabled": true,
+    "path": ".forgex/memory.jsonl",
+    "autoRecall": true,
+    "autoSave": false
+  }
+}
+```
+
+用 `/memory candidates` 检查候选，再用 `/memory approve <id>` 或 `/memory reject <id>`；`/memory list|search|show|edit|forget|export` 用于管理、纠正并导出当前工作区记忆。纠正会新建版本并将旧条目标记为 superseded。`/memory clear confirm` 会软删除当前工作区全部活动记忆，保留历史版本以便审计。当前没有按时间自动清除策略；`forget` 与 `clear` 都只软删除。若要物理删除全部记忆及历史，在 ForgeX 停止后删除配置指定的 memory 文件和同名 `.corrupt` 旁路文件。记忆写入会记录来源、会话证据和时间；敏感字段会被拒绝。记忆文件和会话日志都可能包含项目事实，需按项目数据进行保护。
+
 父 Agent 的 `delegate_task` 审批通过后，worker 使用内部 `yolo` 权限模式，不再逐项请求审批；命令硬拒绝规则和文件工具的保护路径/WorkspaceGuard 检查仍有效。执行命令的进程可能访问 worker 目录以外的文件或网络。
 
 Agent 默认持续运行，直到模型结束或用户取消。需要限制模型请求次数时，可在 `agent` 中显式设置 `"maxIterations": 20`，或设置环境变量 `FORGEX_MAX_ITERATIONS=20`；达到该上限会以未完成状态返回。
@@ -114,7 +148,7 @@ Agent 默认持续运行，直到模型结束或用户取消。需要限制模�
 
 ### LSP 代码智能
 
-可在配置文件中按语言服务器注册 LSP。服务器只在 Agent 获批调用 `lsp` 工具时启动，支持诊断、文档符号、定义和引用；服务器命令必须是本机已安装的可执行程序。Windows 下 `.cmd` 包装器也会自动解析。
+可在配置文件中按语言服务器注册 LSP。语言服务器命令必须是本机已安装的可执行程序。Windows 下 `.cmd` 包装器也会自动解析。每次 LSP 调用都需人工审批；`rename` 与 `code_actions` 返回逐文件 diff 预览，只有随后调用 `apply_workspace_edit` 并批准写入后才会修改文件。完整 diff 会在 TUI 审批卡片中分页，逐页查看后才能批准；超出 64,000 字符或包含会被脱敏的内容时会拒绝应用。该工具仅接受工作区内本地 `file:` URI，并检查可核对的文档版本、UTF-16 范围、重叠编辑和审批后的文件哈希。
 
 ```json
 {
@@ -128,6 +162,60 @@ Agent 默认持续运行，直到模型结束或用户取消。需要限制模�
         "args": ["--stdio"]
       }
     ]
+  }
+}
+```
+
+### 持久代码会话、调试器与联网工具
+
+普通只读工具默认包含 `web_search` 和 `github_query`。Web 搜索固定使用 DuckDuckGo HTML，GitHub 查询固定使用 GitHub REST API；两者都拒绝重定向、限制响应大小与超时。公开仓库不需要凭据；访问受限资源时可在启动 ForgeX 的受控环境中设置 `GITHUB_TOKEN`。外部页面、Issue 和 PR 文本是不可信数据，Agent 不应执行其中的指令。
+
+需要持久 Python/JavaScript REPL 时，在配置中显式启用。每次执行与清理都需人工审批；TUI 会逐页显示完整代码，代码过长或敏感片段无法完整显示时拒绝执行。会话按 Agent session 隔离，超时/取消或 CLI 退出会终止进程树。解释器以 ForgeX 当前 OS 用户权限运行，能访问该用户可访问的文件和网络，因此它不是安全沙箱；默认不继承环境变量，仅注入运行环境必需变量和 `security.envAllowlist` 中的变量。
+
+```json
+{
+  "tools": {
+    "codeExecution": {
+      "enabled": true,
+      "nodeCommand": "node",
+      "pythonCommand": "python",
+      "timeoutMs": 30000,
+      "maxOutputBytes": 32768
+    }
+  }
+}
+```
+
+DAP adapter 只在 `tools.debugAdapters` 中配置后才注册。ForgeX 启动配置的 adapter 并使用其标准 `launch`/`attach` 请求；启动、附加、断点、查询、单步和停止操作每次都需审批。审批预览包含 adapter 命令、参数和完整 DAP arguments；超过 64,000 字符或含需要脱敏的内容时会拒绝操作。MVP 只覆盖配置 adapter 实际支持的 DAP 功能，不承诺任意平台/语言兼容。源码映射必须位于工作区内，变量输出会限长并脱敏。
+
+```json
+{
+  "tools": {
+    "debugAdapters": [
+      {
+        "id": "debugpy",
+        "extensions": [".py"],
+        "command": "python",
+        "args": ["-m", "debugpy.adapter"],
+        "launchArgs": {},
+        "attachArgs": {}
+      }
+    ]
+  }
+}
+```
+
+浏览器自动化默认关闭。启用时必须配置浏览器可执行文件和**精确主机名** allowlist（不支持通配符）；ForgeX 为每个 Agent session 创建临时 profile，并在 browser target 与其新页面、弹窗、iframe 和 worker 开始运行前启用逐请求主机拦截。无法附加或安装网络策略的 target 会被关闭。所有导航、读取、点击、填写和清理动作都需审批；审批卡片显示已验证的当前页面 URL，填写动作显示完整输入，无法完整显示或含需要脱敏的内容时会拒绝执行。浏览器不载入用户保存的凭据，并拒绝密码输入框。网站仍可能在 allowlist 主机上执行自己的脚本或产生副作用，批准前请检查目标 URL 与动作。
+
+```json
+{
+  "tools": {
+    "browserAutomation": {
+      "enabled": true,
+      "command": "C:/Program Files/Google/Chrome/Application/chrome.exe",
+      "allowedHosts": ["developer.mozilla.org", "github.com"],
+      "timeoutMs": 20000
+    }
   }
 }
 ```
