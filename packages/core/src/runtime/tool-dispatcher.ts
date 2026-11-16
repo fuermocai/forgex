@@ -207,12 +207,30 @@ export class ToolDispatcher {
 
     try {
       // 4. 预解析路径：写操作在审批前就暴露越界问题
+      const ctx: ToolContext = {
+        sessionId,
+        workspaceRoot: this.settings.workspaceRoots[0] ?? this.cwd,
+        cwd: this.cwd,
+        signal,
+        auditId,
+        workspace: this.workspace,
+        policy: this.settings,
+      };
       const facts = collectFacts(tool.name, parsed.data);
+      const approvalPaths = tool.getApprovalPaths?.(parsed.data, ctx);
+      if (approvalPaths && approvalPaths.length > 0) facts.paths = [...(facts.paths ?? []), ...approvalPaths];
       const precheck = await this.precheckPaths(tool, facts);
       if (precheck) return await this.finalize({ call, sessionId, auditId, started, tool, outcome: precheck });
 
       // 5. 策略判定（run_command 额外做结构校验）
-      const evaluation = this.evaluate(tool, parsed.data, facts);
+      let evaluation = this.evaluate(tool, parsed.data, facts);
+      if (tool.alwaysRequireApproval && evaluation.decision !== 'deny') {
+        evaluation = {
+          decision: 'ask',
+          reason: '该工具按安全设计要求每次调用都需人工审批',
+          rule: 'tool_requires_approval',
+        };
+      }
       await this.audit.record({
         type: 'policy_decision',
         sessionId,
@@ -246,7 +264,7 @@ export class ToolDispatcher {
 
       // 6. 审批
       if (evaluation.decision === 'ask') {
-        const decision = await this.requestApproval(tool, evaluation, safeInput, call, sessionId, signal);
+        const decision = await this.requestApproval(tool, evaluation, safeInput, parsed.data, ctx, call, sessionId, signal);
         this.onApproval?.();
         if (decision !== 'approved') {
           const message = decision === 'timeout' ? '审批超时，已按拒绝处理' : '用户拒绝了该操作';
@@ -281,15 +299,6 @@ export class ToolDispatcher {
       }
 
       // 7. 执行（超时/取消都会终止等待）
-      const ctx: ToolContext = {
-        sessionId,
-        workspaceRoot: this.settings.workspaceRoots[0] ?? this.cwd,
-        cwd: this.cwd,
-        signal,
-        auditId,
-        workspace: this.workspace,
-        policy: this.settings,
-      };
       const outcome = await this.runWithDeadline(tool, parsed.data, ctx, signal);
 
       return await this.finalize({ call, sessionId, auditId, started, tool, outcome });
@@ -356,6 +365,8 @@ export class ToolDispatcher {
     tool: RegisteredTool,
     evaluation: PolicyEvaluation,
     safeInput: JsonValue,
+    parsedInput: unknown,
+    ctx: ToolContext,
     call: ToolCall,
     sessionId: string,
     signal: AbortSignal,
@@ -366,7 +377,8 @@ export class ToolDispatcher {
       riskLevel: tool.riskLevel,
       reason: evaluation.reason,
       input: safeInput,
-      preview: buildPreview(tool.name, safeInput),
+      preview: buildPreview(tool, safeInput, parsedInput, ctx),
+      ...(tool.requireCompleteApprovalPreview ? { previewMustBeReviewed: true } : {}),
     };
     this.events.emit({ type: 'approval:required', request, ts: Date.now() });
     const decision = await this.approvals.request(request, signal);
@@ -543,19 +555,54 @@ function collectFacts(toolName: string, input: unknown): PolicyFacts {
   return {};
 }
 
-function buildPreview(toolName: string, input: JsonValue): string {
+function buildPreview(tool: RegisteredTool, input: JsonValue, parsedInput: unknown, ctx: ToolContext): string {
+  if (tool.getApprovalPreview) {
+    if (tool.requireCompleteApprovalPreview) {
+      let rawPreview: string;
+      try {
+        rawPreview = tool.getApprovalPreview(parsedInput, ctx);
+      } catch (error) {
+        throw new ForgeError('TOOL_FAILED', `无法生成完整审批预览，已拒绝执行：${error instanceof Error ? error.message : String(error)}`);
+      }
+      const visiblePreview = sanitizeApprovalPreview(rawPreview);
+      const maxChars = tool.maxApprovalPreviewChars;
+      if (!Number.isInteger(maxChars) || (maxChars ?? 0) < 1) {
+        throw new ForgeError('TOOL_FAILED', '完整审批预览未配置有效大小上限，已拒绝执行');
+      }
+      if (visiblePreview.length > maxChars!) {
+        throw new ForgeError('TOOL_FAILED', `完整审批预览超过 ${maxChars} 字符，无法安全展示，已拒绝执行`);
+      }
+      if (redactText(visiblePreview) !== visiblePreview) {
+        throw new ForgeError('TOOL_FAILED', '完整审批预览包含需要脱敏的内容，无法核对实际执行内容，已拒绝执行');
+      }
+      return visiblePreview;
+    }
+    try {
+      return sanitizeApprovalPreview(redactText(takeChars(tool.getApprovalPreview(parsedInput, ctx), 8_000)));
+    } catch (error) {
+      return `审批预览不可用：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  const toolName = tool.name;
   const record = isRecord(input) ? input : {};
   if (toolName === 'run_command') {
     const program = typeof record.program === 'string' ? record.program : '';
     const args = Array.isArray(record.args) ? record.args.map(String) : [];
-    return `${program} ${args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(' ')}`.trim();
+    return sanitizeApprovalPreview(`${program} ${args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(' ')}`.trim());
   }
   if (toolName === 'edit_file' || toolName === 'read_file') {
     const path = typeof record.path === 'string' ? record.path : '(unknown)';
-    return toolName === 'edit_file' ? `将修改文件: ${path}` : `将读取文件: ${path}`;
+    return sanitizeApprovalPreview(toolName === 'edit_file' ? `将修改文件: ${path}` : `将读取文件: ${path}`);
   }
-  if (typeof record.path === 'string') return `目标: ${record.path}`;
+  if (typeof record.path === 'string') return sanitizeApprovalPreview(`目标: ${record.path}`);
   return '';
+}
+
+function sanitizeApprovalPreview(value: string): string {
+  return value
+    .replace(/\u001b/g, '\\x1b')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, (character) => `\\x${character.charCodeAt(0).toString(16).padStart(2, '0')}`)
+    .replace(/[\u202a-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16)}`);
 }
 
 /** limitOutcome 的返回结构：可辨识字段被"拍平"，便于 finalize 统一组装 */

@@ -5,6 +5,7 @@
  * 不直接依赖内部文件布局，便于后续重构。
  */
 export * from './agent/agent.js';
+export * from './agent/advisor.js';
 export * from './agent/extensions.js';
 export * from './agent/agent-loop.js';
 export * from './agent/system-prompt.js';

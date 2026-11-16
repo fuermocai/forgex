@@ -153,6 +153,16 @@ export interface ToolDefinition<Input = unknown, Output = JsonValue> {
   /** Zod schema —— 既用于运行时校验，也用于生成 JSON Schema 给模型 */
   readonly parameters: ZodType<Input>;
   readonly riskLevel: RiskLevel;
+  /** Forces a user approval for every call, even in trusted/yolo modes. */
+  readonly alwaysRequireApproval?: boolean;
+  /** Requires the entire approval preview to be visible before execution is allowed. */
+  readonly requireCompleteApprovalPreview?: boolean;
+  /** Maximum preview size for tools that require full review; larger previews are refused. */
+  readonly maxApprovalPreviewChars?: number;
+  /** Resolves paths that must pass dispatcher preflight before approval. */
+  getApprovalPaths?(input: Input, ctx: ToolContext): readonly string[];
+  /** Produces a trusted preview for the approval request. */
+  getApprovalPreview?(input: Input, ctx: ToolContext): string;
   /** 单次执行超时（毫秒） */
   readonly timeoutMs: number;
   /** 输出字节上限，超限必须截断而不是抛错 */
@@ -179,11 +189,21 @@ export interface ApprovalRequest {
   input: JsonValue;
   /** 额外预览，例如 diff 或命令行 */
   preview?: string;
+  /** The TUI must page through the complete preview before enabling approval. */
+  previewMustBeReviewed?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
 /* 事件（EventBus）                                                    */
 /* ------------------------------------------------------------------ */
+
+export interface WorkerUsage {
+  modelCalls: number;
+  totalTokens: number;
+  toolCalls: number;
+  iterations: number;
+  durationMs: number;
+}
 
 export type AgentEvent =
   | { type: 'session:start'; sessionId: string; ts: number }
@@ -194,6 +214,10 @@ export type AgentEvent =
   | { type: 'input:queue'; items: Array<{ id: string; mode: 'steer' | 'followup'; text: string }>; ts: number }
   | { type: 'context:compacted'; summary: string; sourceMessages: number; ts: number }
   | { type: 'model:request'; attempt: number; messageCount: number; estimatedTokens: number; ts: number }
+  | { type: 'model:response'; modelId: string; modelName: string; role?: string; fallbackReason?: string; ts: number }
+  | { type: 'worker:state'; parentSessionId: string; workerId: string; name: string; status: 'queued' | 'starting' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled'; attempt: number; progress: string; ts: number }
+  | { type: 'worker:progress'; parentSessionId: string; workerId: string; progress: string; usage?: WorkerUsage; ts: number }
+  | { type: 'advisor:review'; stage: 'plan' | 'tools' | 'results' | 'final'; verdict: 'allow' | 'warn' | 'block'; reason: string; ts: number }
   | { type: 'assistant:delta'; text: string; ts: number }
   | { type: 'assistant:message'; text: string; toolCalls: ToolCall[]; ts: number }
   | { type: 'tool:start'; callId: string; name: string; input: JsonValue; ts: number }

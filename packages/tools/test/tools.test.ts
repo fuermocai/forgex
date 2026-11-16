@@ -10,6 +10,7 @@ import { createDefaultPolicySettings, WorkspaceGuard } from '@forgex/security';
 import {
   createBuiltinTools,
   createEditFileTool,
+  createHashlineEditTool,
   createGrepSearchTool,
   createInspectMemoryTool,
   createListDirectoryTool,
@@ -72,6 +73,8 @@ describe('ToolRegistry', () => {
         'inspect_memory',
         'read_logs',
         'run_command',
+        'web_search',
+        'github_query',
       ]),
     );
     const spec = registry.specs().find((item) => item.function.name === 'read_file');
@@ -80,6 +83,21 @@ describe('ToolRegistry', () => {
       properties: { path: { type: 'string' } },
       required: ['path'],
     });
+  });
+
+  it('只在显式配置后注册执行、调试、浏览器与 LSP 工具', () => {
+    const registry = new ToolRegistry(createBuiltinTools({
+      languageServers: [{ id: 'ts', extensions: ['.ts'], languageId: 'typescript', command: 'fake-lsp', args: [] }],
+      codeExecution: { nodeCommand: 'node', pythonCommand: 'python', timeoutMs: 5_000, maxOutputBytes: 8_192 },
+      debugAdapters: [{ id: 'debugpy', extensions: ['.py'], command: 'python', args: [], launchArgs: {}, attachArgs: {} }],
+      browserAutomation: { command: 'chrome', args: [], allowedHosts: ['docs.example.com'], timeoutMs: 5_000 },
+    }));
+    expect(registry.names()).toEqual(expect.arrayContaining([
+      'lsp', 'apply_workspace_edit', 'code_session', 'dap_debug', 'browser_automation',
+    ]));
+    for (const name of ['lsp', 'apply_workspace_edit', 'code_session', 'dap_debug', 'browser_automation']) {
+      expect(registry.require(name).alwaysRequireApproval).toBe(true);
+    }
   });
 
   it('拒绝重复注册与非法名称', () => {
@@ -112,12 +130,43 @@ describe('read_file', () => {
       totalLines: 2,
     });
     expect((outcome.data as { content: string }).content).toContain('answer = 42');
+    expect((outcome.data as { lineHashes: Array<{ line: number; hash: string }> }).lineHashes[0]).toMatchObject({ line: 1 });
   });
 
   it('拒绝路径穿越', async () => {
     const outcome = await createReadFileTool().execute({ path: '../secret.txt' }, makeCtx());
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.error.code).toBe('WORKSPACE_ESCAPE');
+  });
+});
+
+describe('edit_file_hashline', () => {
+  it('replaces the anchored line and rejects stale anchors', async () => {
+    const read = expectOk(await createReadFileTool().execute({ path: 'src/a.ts' }, makeCtx()));
+    const anchor = (read.data as { lineHashes: Array<{ line: number; hash: string }> }).lineHashes[0]!;
+    const edited = expectOk(await createHashlineEditTool().execute({ path: 'src/a.ts', line: anchor.line, lineHash: anchor.hash, newText: 'export const answer = 43;' }, makeCtx()));
+    expect(edited.data).toMatchObject({ changed: true, line: 1 });
+    const stale = await createHashlineEditTool().execute({ path: 'src/a.ts', line: anchor.line, lineHash: anchor.hash, newText: 'bad' }, makeCtx());
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) expect(stale.error.code).toBe('TOOL_FAILED');
+  });
+
+  it('preserves CRLF line endings', async () => {
+    await writeFile(join(root, 'src', 'crlf.ts'), 'one\r\ntwo\r\n', 'utf8');
+    const result = expectOk(await createReadFileTool().execute({ path: 'src/crlf.ts' }, makeCtx()));
+    const anchor = (result.data as { lineHashes: Array<{ line: number; hash: string }> }).lineHashes[1]!;
+    expectOk(await createHashlineEditTool().execute({ path: 'src/crlf.ts', line: anchor.line, lineHash: anchor.hash, newText: 'changed' }, makeCtx()));
+    const { readFile } = await import('node:fs/promises');
+    expect(await readFile(join(root, 'src', 'crlf.ts'), 'utf8')).toBe('one\r\nchanged\r\n');
+  });
+
+  it('preserves mixed line endings on untouched lines', async () => {
+    await writeFile(join(root, 'src', 'mixed.ts'), 'one\r\ntwo\nthree\r\n', 'utf8');
+    const result = expectOk(await createReadFileTool().execute({ path: 'src/mixed.ts' }, makeCtx()));
+    const anchor = (result.data as { lineHashes: Array<{ line: number; hash: string }> }).lineHashes[1]!;
+    expectOk(await createHashlineEditTool().execute({ path: 'src/mixed.ts', line: anchor.line, lineHash: anchor.hash, newText: 'changed' }, makeCtx()));
+    const { readFile } = await import('node:fs/promises');
+    expect(await readFile(join(root, 'src', 'mixed.ts'), 'utf8')).toBe('one\r\nchanged\nthree\r\n');
   });
 });
 

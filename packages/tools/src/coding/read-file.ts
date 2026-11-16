@@ -64,6 +64,10 @@ export function createReadFileTool(): ToolDefinition<Input> {
             endLine: result.endLine,
             totalLines: result.totalLines,
             content: result.text,
+            lineHashes: result.text.split(/\r?\n/).map((line, index) => ({
+              line: result.startLine + index,
+              hash: hashLine(line),
+            })),
             sizeBytes: result.sizeBytes,
             ...(contentHash ? { contentHash } : {}),
           },
@@ -74,4 +78,8 @@ export function createReadFileTool(): ToolDefinition<Input> {
       }
     },
   };
+}
+
+function hashLine(line: string): string {
+  return createHash('sha256').update(line, 'utf8').digest('hex').slice(0, 12);
 }
