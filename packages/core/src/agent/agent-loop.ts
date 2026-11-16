@@ -25,12 +25,13 @@ import {
   type ToolResult,
   type TurnEndReason,
 } from '@forgex/shared';
-import type { ModelProvider } from '@forgex/models';
+import type { ChatResponse, ModelProvider } from '@forgex/models';
 import type { ToolRegistry } from '@forgex/tools';
 import type { ContextManager } from '../context/context-manager.js';
 import type { EventBus } from '../events/event-bus.js';
 import type { MetricsCollector } from '../runtime/metrics.js';
 import type { ToolDispatcher } from '../runtime/tool-dispatcher.js';
+import { Advisor, type AdvisorStage, type AdvisorReview } from './advisor.js';
 
 export interface AgentLoopOptions {
   provider: ModelProvider;
@@ -46,16 +47,21 @@ export interface AgentLoopOptions {
   logger?: Logger;
   /** 每条新消息的持久化回调（Agent 注入 SessionStore） */
   persistMessage?: (message: ChatMessage) => void;
+  /** Ephemeral per-request context that is never appended to or persisted in session history. */
+  getContextMessages?: (userText: string) => ReadonlyArray<ChatMessage>;
   /** 子代理预算钩子：每次模型请求前调用 */
   onModelRequest?: (iteration: number) => void;
   /** 子代理预算钩子：模型用量返回后调用 */
   onModelUsage?: (totalTokens: number) => void;
+  /** Persist and expose the model that actually answered each request. */
+  onModelResponse?: (response: ChatResponse) => void;
   /** 可在工具执行前拒绝整批调用，避免越过子代理工具预算 */
   beforeToolCalls?: (count: number) => boolean;
   /** 取出已排队的 steering 指令；只在一批工具执行完成后消费 */
   takeSteering?: () => Array<{ id: string; text: string }>;
   onContextCompacted?: (summary: string, sourceMessages: number) => void;
   onContextCompactionFailed?: (reason: string, sourceMessages: number) => void;
+  advisor?: Advisor;
 }
 
 export interface LoopRunOptions {
@@ -95,12 +101,15 @@ export class AgentLoop {
   private readonly repeatThreshold: number;
   private readonly logger: Logger | undefined;
   private readonly persistMessage: ((message: ChatMessage) => void) | undefined;
+  private readonly getContextMessages: ((userText: string) => ReadonlyArray<ChatMessage>) | undefined;
   private readonly onModelRequest: ((iteration: number) => void) | undefined;
   private readonly onModelUsage: ((totalTokens: number) => void) | undefined;
+  private readonly onModelResponse: ((response: ChatResponse) => void) | undefined;
   private readonly beforeToolCalls: ((count: number) => boolean) | undefined;
   private readonly takeSteering: (() => Array<{ id: string; text: string }>) | undefined;
   private readonly onContextCompacted: ((summary: string, sourceMessages: number) => void) | undefined;
   private readonly onContextCompactionFailed: ((reason: string, sourceMessages: number) => void) | undefined;
+  private readonly advisor: Advisor | undefined;
 
   constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -115,12 +124,15 @@ export class AgentLoop {
     this.repeatThreshold = Math.max(2, options.repeatThreshold ?? DEFAULT_REPEAT_THRESHOLD);
     this.logger = options.logger;
     this.persistMessage = options.persistMessage;
+    this.getContextMessages = options.getContextMessages;
     this.onModelRequest = options.onModelRequest;
     this.onModelUsage = options.onModelUsage;
+    this.onModelResponse = options.onModelResponse;
     this.beforeToolCalls = options.beforeToolCalls;
     this.takeSteering = options.takeSteering;
     this.onContextCompacted = options.onContextCompacted;
     this.onContextCompactionFailed = options.onContextCompactionFailed;
+    this.advisor = options.advisor;
   }
 
   /** 运行时切换模型（Provider 实例整体替换，下一轮请求生效） */
@@ -189,6 +201,7 @@ export class AgentLoop {
             });
             metrics.recordModelCall({ durationMs: Date.now() - compactionStarted, firstTokenMs: null, ...compacted.usage });
             this.onModelUsage?.(compacted.usage.totalTokens);
+            this.recordModelResponse(compacted);
             const summary = compacted.message.content?.trim() ?? '';
             if (isStructuredSummary(summary) && this.context.compactWithSummary(summary)) {
               this.onContextCompacted?.(summary, source.messageCount);
@@ -229,7 +242,7 @@ export class AgentLoop {
         });
         this.context.replace(repaired.messages.filter((message) => message.role !== 'system'));
       }
-      const requestMessages = repaired.messages;
+      const requestMessages = insertContextMessages(repaired.messages, this.getContextMessages?.(userText) ?? []);
 
       this.events.emit({
         type: 'model:request',
@@ -243,12 +256,21 @@ export class AgentLoop {
       const requestStarted = Date.now();
       let firstTokenAt: number | null = null;
       let response;
+      const streamedDeltas: string[] = [];
+      const bufferDeltas = Boolean(
+        this.advisor && (
+          this.advisor.isEnabledFor('tools')
+          || this.advisor.isEnabledFor('final')
+          || (iteration === 1 && this.advisor.isEnabledFor('plan'))
+        ),
+      );
       try {
         response = await this.provider.chat(
           { messages: requestMessages, tools: toolSpecs, signal },
           {
             onDelta: (text) => {
-              this.events.emit({ type: 'assistant:delta', text, ts: Date.now() });
+              if (bufferDeltas) streamedDeltas.push(text);
+              else this.events.emit({ type: 'assistant:delta', text, ts: Date.now() });
             },
             onFirstToken: () => {
               firstTokenAt ??= Date.now();
@@ -283,10 +305,40 @@ export class AgentLoop {
         totalTokens: response.usage.totalTokens,
       });
       this.onModelUsage?.(response.usage.totalTokens);
+      this.recordModelResponse(response);
 
       const content = response.message.content ?? '';
       if (content.length > 0) lastText = content;
       const toolCalls = response.message.tool_calls ?? [];
+
+      const planReview = iteration === 1
+        ? await this.reviewAdvisor('plan', {
+            userInput: userText,
+            proposedApproach: content,
+            proposedTools: toolCalls.map((call) => ({ name: call.function.name, arguments: call.function.arguments })),
+          }, signal)
+        : undefined;
+      if (planReview?.verdict === 'block') {
+        const error = new ForgeError('ADVISOR_BLOCKED', `Advisor blocked the plan: ${planReview.reason}`);
+        return { text: '', reason: 'error', iterations, toolCalls: totalToolCalls, toolResults: allToolResults, error: toToolErrorInfo(error) };
+      }
+
+      const finalReview = toolCalls.length === 0 && (response.finishReason === 'stop' || response.finishReason === 'length')
+        ? await this.reviewAdvisor('final', { answer: content, userInput: userText }, signal)
+        : undefined;
+      const toolReview = toolCalls.length > 0
+        ? await this.reviewAdvisor('tools', {
+            calls: toolCalls.map((call) => ({ name: call.function.name, arguments: call.function.arguments })),
+            assistantText: content,
+          }, signal)
+        : undefined;
+
+      if (finalReview?.verdict === 'block') {
+        const error = new ForgeError('ADVISOR_BLOCKED', `Advisor blocked the final response: ${finalReview.reason}`);
+        return { text: '', reason: 'error', iterations, toolCalls: totalToolCalls, toolResults: allToolResults, error: toToolErrorInfo(error) };
+      }
+
+      if (bufferDeltas) this.emitBufferedDeltas(streamedDeltas);
 
       // 4. 记录 assistant 消息（无论是否含工具调用都要入历史，保证下一轮上下文完整）
       const assistantMessage: ChatMessage = {
@@ -296,6 +348,15 @@ export class AgentLoop {
       };
       this.append([assistantMessage]);
       this.events.emit({ type: 'assistant:message', text: content, toolCalls, ts: Date.now() });
+
+      if (toolReview?.verdict === 'block') {
+        const blocked = synthesizeResults(toolCalls, 'ADVISOR_BLOCKED', toolReview.reason);
+        this.appendToolMessages(toolCalls, blocked);
+        allToolResults.push(...toolCalls.map((call, index) => ({ toolName: call.function.name, result: blocked[index]! })));
+        totalToolCalls += toolCalls.length;
+        const error = new ForgeError('ADVISOR_BLOCKED', `Advisor blocked the tool calls: ${toolReview.reason}`);
+        return { text: content, reason: 'error', iterations, toolCalls: totalToolCalls, toolResults: allToolResults, error: toToolErrorInfo(error) };
+      }
 
       // 预算或用户取消可能在模型请求期间触发。为模型已发出的调用补齐协议，
       // 但不要在预算超限后继续执行工具。
@@ -392,6 +453,14 @@ export class AgentLoop {
       this.appendToolMessages(toolCalls, results);
       totalToolCalls += toolCalls.length;
 
+      const resultsReview = await this.reviewAdvisor('results', {
+        results: toolCalls.map((call, index) => ({ name: call.function.name, result: results[index] })),
+      }, signal);
+      if (resultsReview?.verdict === 'block') {
+        const error = new ForgeError('ADVISOR_BLOCKED', `Advisor blocked follow-up after tool results: ${resultsReview.reason}`);
+        return { text: lastText, reason: 'error', iterations, toolCalls: totalToolCalls, toolResults: allToolResults, error: toToolErrorInfo(error) };
+      }
+
       for (const queued of this.takeSteering?.() ?? []) {
         this.append([{ role: 'user', content: queued.text }]);
         this.events.emit({ type: 'input:dequeued', id: queued.id, mode: 'steer', ts: Date.now() });
@@ -405,12 +474,38 @@ export class AgentLoop {
 
   }
 
+  private async reviewAdvisor(stage: AdvisorStage, payload: unknown, signal: AbortSignal): Promise<AdvisorReview | undefined> {
+    if (!this.advisor) return undefined;
+    const review = await this.advisor.review(stage, payload, signal);
+    this.events.emit({ type: 'advisor:review', stage, verdict: review.verdict, reason: review.reason, ts: Date.now() });
+    return review;
+  }
+
+  private emitBufferedDeltas(deltas: ReadonlyArray<string>): void {
+    for (const text of deltas) {
+      this.events.emit({ type: 'assistant:delta', text, ts: Date.now() });
+    }
+  }
+
   /** 追加消息并持久化 */
   private append(messages: ChatMessage[]): void {
     for (const message of messages) {
       this.context.append(message);
       this.persistMessage?.(message);
     }
+  }
+
+  private recordModelResponse(response: ChatResponse): void {
+    this.onModelResponse?.(response);
+    const event = {
+      type: 'model:response' as const,
+      modelId: response.modelId ?? this.provider.currentModelId ?? this.provider.config.model,
+      modelName: response.modelName ?? this.provider.config.model,
+      ...(this.provider.currentModelRole ? { role: this.provider.currentModelRole } : {}),
+      ...(response.fallbackReason ? { fallbackReason: response.fallbackReason } : {}),
+      ts: Date.now(),
+    };
+    this.events.emit(event);
   }
 
   /** 为每个 tool_call 生成严格配对、顺序一致的 tool 消息 */
@@ -437,6 +532,17 @@ export class AgentLoop {
     });
     this.append(messages);
   }
+}
+
+function insertContextMessages(messages: ChatMessage[], contextMessages: ReadonlyArray<ChatMessage>): ChatMessage[] {
+  if (contextMessages.length === 0) return messages;
+  const currentUserIndex = messages.findLastIndex((message) => message.role === 'user');
+  if (currentUserIndex < 0) return messages;
+  return [
+    ...messages.slice(0, currentUserIndex + 1),
+    ...contextMessages,
+    ...messages.slice(currentUserIndex + 1),
+  ];
 }
 
 function isStructuredSummary(summary: string): boolean {

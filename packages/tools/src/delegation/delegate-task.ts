@@ -25,6 +25,8 @@ const inputSchema = z.object({
 export type DelegateTaskInput = z.infer<typeof inputSchema>;
 
 export interface DelegateTaskResult {
+  workerId?: string;
+  attempt?: number;
   name: string;
   status: 'completed' | 'failed' | 'cancelled';
   summary: string;

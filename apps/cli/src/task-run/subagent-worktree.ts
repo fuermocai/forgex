@@ -10,6 +10,7 @@ const GIT_TIMEOUT_MS = 60_000;
 
 export interface SubagentSnapshot {
   repoRoot: string;
+  gitCommonDir: string;
   baseline: string;
   root: string;
   hooksPath: string;
@@ -18,6 +19,7 @@ export interface SubagentSnapshot {
 export interface SubagentWorktree {
   id: string;
   repoRoot: string;
+  gitCommonDir: string;
   root: string;
   path: string;
   baseline: string;
@@ -39,6 +41,8 @@ interface GitResult {
 export async function createSubagentSnapshot(cwd: string, signal?: AbortSignal): Promise<SubagentSnapshot> {
   const repoRoot = await gitText(['rev-parse', '--show-toplevel'], cwd, signal);
   const canonicalRepo = await realpath(repoRoot.trim());
+  const commonDir = (await gitText(['rev-parse', '--git-common-dir'], canonicalRepo, signal)).trim();
+  const gitCommonDir = await realpath(resolve(canonicalRepo, commonDir));
   const head = (await gitText(['rev-parse', 'HEAD'], canonicalRepo, signal)).trim();
   await ensureNoExternalFilters(canonicalRepo, signal);
   const entries = (await gitText(['ls-files', '--cached', '--others', '--exclude-standard', '-z'], canonicalRepo, signal))
@@ -89,7 +93,7 @@ export async function createSubagentSnapshot(cwd: string, signal?: AbortSignal):
       '-c', 'user.name=ForgeX', '-c', 'user.email=forgex@localhost', '-c', 'commit.gpgsign=false',
       'commit-tree', tree, '-p', head, '-m', `ForgeX subagent snapshot ${uuid()}`,
     ], canonicalRepo, signal)).trim();
-    return { repoRoot: canonicalRepo, baseline: commit, root: await realpath(root), hooksPath: await realpath(hooksPath) };
+    return { repoRoot: canonicalRepo, gitCommonDir, baseline: commit, root: await realpath(root), hooksPath: await realpath(hooksPath) };
   } catch (error) {
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
     throw error;
@@ -108,13 +112,22 @@ export async function createSubagentWorktree(snapshot: SubagentSnapshot, name: s
   try {
     const actualPath = await realpath(path);
     assertInside(await realpath(snapshot.root), actualPath);
-    const worktreeRepo = (await gitText(['rev-parse', '--show-toplevel'], actualPath, signal)).trim();
-    if (normalizePath(await realpath(worktreeRepo)) !== normalizePath(snapshot.repoRoot)) {
-      throw new ForgeError('WORKTREE_PATH_INVALID', 'Git worktree 所属仓库与父仓库不一致');
+    const worktreeRoot = (await gitText(['rev-parse', '--show-toplevel'], actualPath, signal)).trim();
+    if (normalizePath(await realpath(worktreeRoot)) !== normalizePath(actualPath)) {
+      throw new ForgeError('WORKTREE_PATH_INVALID', 'Git worktree 根目录与请求路径不一致', {
+        details: { expectedWorktreePath: actualPath, actualWorktreeRoot: worktreeRoot },
+      });
+    }
+    const commonDir = (await gitText(['rev-parse', '--git-common-dir'], actualPath, signal)).trim();
+    const actualCommonDir = await realpath(resolve(actualPath, commonDir));
+    if (normalizePath(actualCommonDir) !== normalizePath(snapshot.gitCommonDir)) {
+      throw new ForgeError('WORKTREE_PATH_INVALID', 'Git worktree 所属仓库与父仓库不一致', {
+        details: { expectedGitCommonDir: snapshot.gitCommonDir, actualGitCommonDir: actualCommonDir, worktreePath: actualPath },
+      });
     }
     const head = (await gitText(['rev-parse', 'HEAD'], actualPath, signal)).trim();
     if (head !== snapshot.baseline) throw new ForgeError('WORKTREE_PATH_INVALID', 'Git worktree 未从派发快照基线创建');
-    return { id, repoRoot: snapshot.repoRoot, root: snapshot.root, path: actualPath, baseline: snapshot.baseline };
+    return { id, repoRoot: snapshot.repoRoot, gitCommonDir: snapshot.gitCommonDir, root: snapshot.root, path: actualPath, baseline: snapshot.baseline };
   } catch (error) {
     await gitText(['-c', `core.hooksPath=${snapshot.hooksPath}`, 'worktree', 'remove', '--force', path], snapshot.repoRoot).catch(() => undefined);
     throw error;
@@ -153,8 +166,13 @@ export async function cleanupSubagentWorktree(worktree: SubagentWorktree): Promi
   if (!registeredPaths.includes(normalizePath(target))) {
     throw new ForgeError('WORKTREE_PATH_INVALID', '目标目录不是父仓库登记的 Git worktree');
   }
-  const actualRepo = (await gitText(['rev-parse', '--show-toplevel'], target)).trim();
-  if (normalizePath(await realpath(actualRepo)) !== normalizePath(worktree.repoRoot)) {
+  const actualRoot = (await gitText(['rev-parse', '--show-toplevel'], target)).trim();
+  if (normalizePath(await realpath(actualRoot)) !== normalizePath(target)) {
+    throw new ForgeError('WORKTREE_PATH_INVALID', 'worktree 根目录不匹配，拒绝清理');
+  }
+  const commonDir = (await gitText(['rev-parse', '--git-common-dir'], target)).trim();
+  const actualCommonDir = await realpath(resolve(target, commonDir));
+  if (normalizePath(actualCommonDir) !== normalizePath(worktree.gitCommonDir)) {
     throw new ForgeError('WORKTREE_PATH_INVALID', 'worktree 所属仓库不匹配，拒绝清理');
   }
   const baselineCheck = await git(['merge-base', '--is-ancestor', worktree.baseline, 'HEAD'], target);
@@ -230,7 +248,10 @@ function git(
       cwd,
       shell: false,
       windowsHide: true,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...extraEnv },
+      // Keep machine-wide Git filters (for example Git for Windows' system LFS
+      // registration) out of snapshots. Repository/global filters remain visible
+      // to ensureNoExternalFilters and are rejected before any add/worktree runs.
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const stdout: Buffer[] = [];
