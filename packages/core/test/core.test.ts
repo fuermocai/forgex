@@ -25,7 +25,7 @@ import {
   type PolicySettings,
   type ToolCall,
 } from '@forgex/shared';
-import { createProvider } from '@forgex/models';
+import { createProvider, ModelRouter, RoutedModelProvider, type ModelProvider } from '@forgex/models';
 import {
   ApprovalManager,
   AuditLogger,
@@ -178,9 +178,10 @@ function createAgent(options: {
   maxIterations?: number;
   repeatThreshold?: number;
   contextWindow?: number;
+  provider?: ModelProvider;
   extensions?: ReadonlyArray<ForgeExtension>;
 }): AgentFixture {
-  const provider = createProvider({
+  const provider = options.provider ?? createProvider({
     baseUrl: options.baseUrl,
     model: 'fake-model',
     contextWindow: options.contextWindow ?? 8192,
@@ -589,6 +590,50 @@ describe('上下文管理', () => {
 });
 
 describe('会话恢复', () => {
+  it('通过角色路由运行并恢复会话角色与实际模型', async () => {
+    fake = await startFakeModel(() => ({ content: 'role routed' }));
+    const makeRoutedProvider = () => {
+      const router = new ModelRouter();
+      const primaryConfig = {
+        baseUrl: fake!.baseUrl, model: 'primary-model', contextWindow: 8192,
+        maxOutputTokens: 1024, temperature: 0, timeoutMs: 5000, maxRetries: 0, stream: false,
+      };
+      const unavailablePrimary: ModelProvider = {
+        name: 'primary-model',
+        config: primaryConfig,
+        async chat() { throw new Error('primary temporary outage'); },
+      };
+      router.register({
+        id: 'primary-id',
+        provider: unavailablePrimary,
+        capabilities: ['chat', 'coding'], tier: 1, available: true, contextWindow: 8192,
+      });
+      router.register({
+        id: 'backup-id',
+        provider: createProvider({ ...primaryConfig, model: 'backup-model' }),
+        capabilities: ['chat', 'coding'], tier: 2, available: true, contextWindow: 8192,
+      });
+      return new RoutedModelProvider(router, { default: 'primary-id', coding: 'primary-id' });
+    };
+
+    const first = createAgent({ baseUrl: fake.baseUrl, provider: makeRoutedProvider() });
+    first.agent.setModelRole('coding');
+    const result = await first.agent.run('use coding route');
+
+    expect(result.text).toBe('role routed');
+    expect(store.getSession(result.sessionId)).toMatchObject({ model: 'backup-model', modelId: 'backup-id', modelRole: 'coding' });
+    expect(first.events.find((event) => event.type === 'model:response')).toMatchObject({
+      type: 'model:response', modelId: 'backup-id', modelName: 'backup-model', role: 'coding',
+      fallbackReason: expect.stringContaining('primary temporary outage'),
+    });
+
+    const restored = createAgent({ baseUrl: fake.baseUrl, provider: makeRoutedProvider(), sessionId: result.sessionId });
+    expect(restored.agent.modelRole).toBe('coding');
+    const continued = await restored.agent.run('continue with the restored role');
+    expect(continued.text).toBe('role routed');
+    expect(store.getSession(result.sessionId)?.modelRole).toBe('coding');
+  });
+
   it('使用同一 sessionId 恢复历史并继续多轮对话', async () => {
     fake = await startFakeModel((body, index) => {
       if (index === 0) {

@@ -13,16 +13,19 @@
  *  - /plan    计划模式开关（权限降为 readonly + 系统提示词追加规划约束）
  *  - /connect 在 TUI 内完成 Key 校验、持久化与配置落盘
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
 import { formatMs, redactText, type AgentEvent, type ApprovalRequest, type RunMetrics } from '@forgex/shared';
 import { createProvider, type ModelConfig } from '@forgex/models';
 import type { ForgeRuntime } from '../runtime/create-runtime.js';
-import { switchModel as applyModelSwitch } from '../runtime/model-switch.js';
+import { dispatchWorkerHubCommand, isWorkerHubCommand } from '../runtime/worker-hub.js';
+import { dispatchMemoryCommand, isMemoryCommand } from '../runtime/memory-command.js';
+import { checkModelConnectivity, formatConfiguredModels, switchModel as applyModelSwitch, switchModelRole } from '../runtime/model-switch.js';
 import { applyApiKey, currentApiKeyEnv } from '../runtime/api-key.js';
 import { VERSION } from '../version.js';
 import type { ApprovalBridge } from './approval-bridge.js';
 import { applyInputKey, type EditKeyState } from './input-edit.js';
+import { paginateApprovalPreview } from './approval-preview.js';
 import {
   nextPermissionMode,
   parsePermissionMode,
@@ -84,7 +87,14 @@ const THEME = {
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const COMMANDS = [
-  { name: '/models', desc: '切换模型（保留会话历史）' },
+  { name: '/models', desc: '查看已配置模型、切换角色或检查连通性' },
+  { name: '/memory', desc: '查看、搜索、纠正和审核项目记忆' },
+  { name: '/workers', desc: '查看当前会话 worker 状态' },
+  { name: '/worker', desc: '查看 worker 摘要或 transcript' },
+  { name: '/steer', desc: '向运行中的 worker 发送指令' },
+  { name: '/cancel-worker', desc: '取消 worker' },
+  { name: '/retry-worker', desc: '重试已结束的 worker' },
+  { name: '/wait-worker', desc: '等待 worker 完成' },
   { name: '/key', desc: '填写 API Key（隐藏输入，回车即存）' },
   { name: '/mode', desc: '切换权限模式（readonly/standard/trusted/yolo）' },
   { name: '/plan', desc: '计划模式：只读，只出方案不改代码' },
@@ -100,7 +110,24 @@ const COMMANDS = [
 
 const HELP = [
   '命令',
-  '  /models   切换模型（会话历史保留）',
+  '  /models   查看已配置模型与角色',
+  '  /models role <角色> [model-id]  切换模型任务角色',
+  '  /models check <model-id>       检查模型连通性',
+  '  /memory list                   列出当前工作区的项目记忆',
+  '  /memory search <词>            搜索项目记忆',
+  '  /memory show <id>              查看记忆来源、证据与状态',
+  '  /memory edit <id> <内容>       纠正记忆并保留旧版本',
+  '  /memory forget <id>            作废一条记忆',
+  '  /memory clear confirm          清空当前工作区活动记忆（保留历史）',
+  '  /memory export                 导出项目记忆 JSON',
+  '  /memory candidates             查看待审核记忆候选',
+  '  /memory approve|reject <id>    批准或拒绝候选',
+  '  /workers                       查看 worker 状态与资源用量',
+  '  /worker <id> [transcript]      查看摘要；指定 transcript 才显示完整对话',
+  '  /steer <id> <指令>             向运行中的 worker 发送指令',
+  '  /cancel-worker <id>            取消 worker',
+  '  /retry-worker <id>             重试已结束的 worker',
+  '  /wait-worker <id>              等待 worker 结束',
   '  /key      填写 API Key：/key（隐藏输入，推荐）或 /key sk-xxx（会立即校验连通性）',
   '  /mode     查看或切换权限模式：/mode standard、/mode plan、/mode agent',
   '  /plan     进入/退出计划模式（只读，只出计划不改代码）',
@@ -120,7 +147,7 @@ const HELP = [
   '  ←/→       移动光标',
   '  Ctrl+A/E  行首 / 行尾',
   '  Ctrl+C    取消当前任务；空闲时再按一次退出',
-  '  审批时    y 批准 / n 或 Esc 拒绝',
+  '  审批时    y 批准 / n 或 Esc 拒绝；完整预览用 ↑/↓ 翻页并看完后才能批准',
 ].join('\n');
 
 export function App({ runtime, bridge }: AppProps): React.ReactElement {
@@ -135,6 +162,8 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
   const [busy, setBusy] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [approvalPreviewPage, setApprovalPreviewPage] = useState(0);
+  const [highestReviewedPreviewPage, setHighestReviewedPreviewPage] = useState(0);
   const [metrics, setMetrics] = useState<RunMetrics | null>(null);
   const [contextTokens, setContextTokens] = useState(0);
   const [queuedInputs, setQueuedInputs] = useState<Array<{ id: string; mode: 'steer' | 'followup'; text: string }>>([]);
@@ -148,6 +177,7 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [width, setWidth] = useState(stdout?.columns ?? 80);
+  const [height, setHeight] = useState(stdout?.rows ?? 24);
 
   const counter = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
@@ -158,7 +188,10 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
 
   useEffect(() => {
     if (!stdout) return;
-    const onResize = () => setWidth(stdout.columns ?? 80);
+    const onResize = () => {
+      setWidth(stdout.columns ?? 80);
+      setHeight(stdout.rows ?? 24);
+    };
     stdout.on('resize', onResize);
     return () => {
       stdout.off('resize', onResize);
@@ -187,6 +220,26 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
   useEffect(() => {
     const offEvent = agent.events.on((event: AgentEvent) => {
       switch (event.type) {
+        case 'model:response':
+          setModelName(event.modelName);
+          if (event.fallbackReason) push('notice', `模型已回退到 ${event.modelName} (${event.modelId})：${event.fallbackReason}`);
+          break;
+        case 'advisor:review':
+          if (event.verdict === 'warn' || event.verdict === 'block') {
+            push(event.verdict === 'block' ? 'error' : 'notice', `Advisor ${event.verdict} (${event.stage}): ${event.reason}`);
+          }
+          break;
+        case 'worker:state':
+          if (event.parentSessionId === agent.sessionId) {
+            push('notice', `Worker ${event.workerId} [${event.status}] ${event.name}: ${event.progress}`);
+          }
+          break;
+        case 'worker:progress':
+          if (event.parentSessionId === agent.sessionId) {
+            const usage = event.usage ? ` · ${event.usage.totalTokens} tokens / ${event.usage.toolCalls} 工具` : '';
+            push('notice', `Worker ${event.workerId}: ${event.progress}${usage}`);
+          }
+          break;
         case 'assistant:delta':
           streamingRef.current += event.text;
           setStreaming(streamingRef.current);
@@ -237,6 +290,8 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
     });
 
     const offApproval = bridge.onRequest((request) => {
+      setApprovalPreviewPage(0);
+      setHighestReviewedPreviewPage(0);
       setApproval(request);
     });
 
@@ -475,6 +530,23 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
       const [name = '', ...rest] = text.split(/\s+/);
       const arg = rest.join(' ').trim();
 
+      if (isWorkerHubCommand(text)) {
+        void dispatchWorkerHubCommand(runtime, text).then((message) => {
+          push('notice', message);
+        }).catch((err: unknown) => {
+          push('error', `Agent Hub 命令失败：${err instanceof Error ? err.message : String(err)}`);
+        });
+        return;
+      }
+      if (isMemoryCommand(text)) {
+        void dispatchMemoryCommand(runtime, text).then((message) => {
+          push('notice', message);
+        }).catch((err: unknown) => {
+          push('error', `Memory 命令失败：${err instanceof Error ? err.message : String(err)}`);
+        });
+        return;
+      }
+
       switch (name) {
         case '/exit':
         case '/quit':
@@ -572,7 +644,36 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
             return;
           }
           if (arg) {
+            const [operation, roleOrId, modelId] = arg.split(/\s+/);
+            if (operation === 'role') {
+              if (!roleOrId) {
+                push('error', '用法: /models role <角色> [model-id]');
+                return;
+              }
+              try {
+                const result = switchModelRole(runtime, roleOrId, modelId);
+                setModelName(result.model);
+                push('notice', `已切换 ${result.role} 角色: ${result.modelId} (${result.model})${result.saved ? '（配置已保存）' : '（本次会话生效，配置未保存）'}`);
+              } catch (err) {
+                push('error', `切换模型角色失败: ${err instanceof Error ? err.message : String(err)}`);
+              }
+              return;
+            }
+            if (operation === 'check') {
+              if (!roleOrId) {
+                push('error', '用法: /models check <model-id>');
+                return;
+              }
+              void checkModelConnectivity(runtime, roleOrId).then((result) => {
+                push(result.ok ? 'notice' : 'error', `${roleOrId}: ${result.reason}${result.detail ? `（${result.detail}）` : ''}${result.latencyMs !== undefined ? ` ${result.latencyMs}ms` : ''}`);
+              }).catch((err: unknown) => push('error', `模型检查失败: ${err instanceof Error ? err.message : String(err)}`));
+              return;
+            }
             switchModel(arg);
+            return;
+          }
+          if (runtime.config.models.some((model) => model.id !== 'legacy-default')) {
+            push('notice', formatConfiguredModels(runtime));
             return;
           }
           setWizard({ step: 'pickModel' });
@@ -703,6 +804,16 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
     ? availableCommands.filter((command) => command.name.startsWith(input.toLowerCase()))
     : [];
   const selectedPalette = palette[Math.min(paletteIndex, Math.max(0, palette.length - 1))];
+  const approvalPages = useMemo(() => approval
+    ? paginateApprovalPreview(approval.preview ?? '', Math.max(2, width - 18), Math.max(1, Math.min(8, height - 12)))
+    : [], [approval, height, width]);
+  const visibleApprovalPage = Math.min(approvalPreviewPage, Math.max(0, approvalPages.length - 1));
+
+  useEffect(() => {
+    if (!approval) return;
+    setApprovalPreviewPage(0);
+    setHighestReviewedPreviewPage(0);
+  }, [approval?.id, height, width]);
 
   useEffect(() => {
     setPaletteIndex(0);
@@ -711,7 +822,21 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
   useInput((char, key) => {
     // 审批优先：此时普通输入被屏蔽
     if (approval) {
+      if (approval.previewMustBeReviewed && key.downArrow) {
+        const nextPage = Math.min(visibleApprovalPage + 1, approvalPages.length - 1);
+        setApprovalPreviewPage(nextPage);
+        setHighestReviewedPreviewPage((highest) => Math.max(highest, nextPage));
+        return;
+      }
+      if (approval.previewMustBeReviewed && key.upArrow) {
+        setApprovalPreviewPage(Math.max(0, visibleApprovalPage - 1));
+        return;
+      }
       if (char.toLowerCase() === 'y') {
+        if (approval.previewMustBeReviewed && highestReviewedPreviewPage < approvalPages.length - 1) {
+          push('notice', '完整审批预览尚未逐页查看；请用 ↓ 继续、↑ 返回，然后再批准');
+          return;
+        }
         setApproval(null);
         bridge.respond(true);
         push('notice', '已批准');
@@ -862,7 +987,13 @@ export function App({ runtime, bridge }: AppProps): React.ReactElement {
       ) : null}
 
       {approval ? (
-        <ApprovalPanel approval={approval} />
+        <ApprovalPanel
+          approval={approval}
+          page={approvalPages[visibleApprovalPage] ?? []}
+          pageNumber={visibleApprovalPage + 1}
+          pageCount={approvalPages.length}
+          fullyReviewed={!approval.previewMustBeReviewed || highestReviewedPreviewPage >= approvalPages.length - 1}
+        />
       ) : wizard ? (
         <WizardPanel wizard={wizard} input={input} cursor={cursor} modelName={modelName} />
       ) : (
@@ -1032,7 +1163,19 @@ function CommandPalette({
   );
 }
 
-function ApprovalPanel({ approval }: { approval: ApprovalRequest }): React.ReactElement {
+function ApprovalPanel({
+  approval,
+  page,
+  pageNumber,
+  pageCount,
+  fullyReviewed,
+}: {
+  approval: ApprovalRequest;
+  page: ReturnType<typeof paginateApprovalPreview>[number];
+  pageNumber: number;
+  pageCount: number;
+  fullyReviewed: boolean;
+}): React.ReactElement {
   return (
     <Box marginTop={1} flexDirection="column" borderStyle="round" borderColor={THEME.warning} paddingX={1}>
       <Box>
@@ -1044,9 +1187,14 @@ function ApprovalPanel({ approval }: { approval: ApprovalRequest }): React.React
       </Box>
       <Text>{approval.reason}</Text>
       {approval.preview ? (
-        <Text dimColor wrap="truncate-end">
-          {approval.preview}
-        </Text>
+        <Box flexDirection="column">
+          {approval.previewMustBeReviewed ? <Text color={THEME.warning}>完整预览 {pageNumber}/{pageCount} · {fullyReviewed ? '已逐页查看' : '使用 ↓ 继续、↑ 返回；看完后才可批准'}</Text> : null}
+          {page.map((line, index) => (
+            <Text key={`${pageNumber}-${index}`} dimColor={!line.continuesPrevious} wrap="wrap">
+              {line.continuesPrevious ? '↪ ' : ''}{line.text || ' '}
+            </Text>
+          ))}
+        </Box>
       ) : null}
       <Box marginTop={1}>
         <Text color={THEME.success}>[y]</Text>

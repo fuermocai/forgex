@@ -692,7 +692,7 @@ export async function runCommand(args: ParsedArgs, options: { cwd: string }): Pr
     process.removeListener('SIGTERM', onSigterm);
     rl?.close();
     store.close();
-    runtime?.close();
+    await runtime?.close();
   }
 }
 

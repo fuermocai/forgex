@@ -34,6 +34,32 @@ describe('loadConfig', () => {
     expect(loaded.config.security.workspaceRoots).toEqual([resolve(dir)]);
     expect(loaded.config.session.dbPath).toBe(resolve(dir, '.forgex', 'events.jsonl'));
     expect(loaded.config.security.auditLogPath).toBe(resolve(dir, '.forgex', 'audit.jsonl'));
+    expect(loaded.config.tools.codeExecution.enabled).toBe(false);
+    expect(loaded.config.tools.browserAutomation.enabled).toBe(false);
+    expect(loaded.config.advisor.enabled).toBe(false);
+    expect(loaded.config.memory.enabled).toBe(true);
+    expect(loaded.config.memory.autoRecall).toBe(true);
+    expect(loaded.config.memory.autoSave).toBe(false);
+  });
+
+  it('解析 Advisor 模型、检查阶段与运行上限，并拒绝未知模型', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      models: [{
+        id: 'reasoner', baseUrl: 'https://advisor.example/v1', apiKeyEnv: 'ADVISOR_KEY', model: 'reasoning-model',
+        contextWindow: 8192, maxOutputTokens: 1024, capabilities: ['chat', 'reasoning'], costTier: 3, speedTier: 3,
+      }],
+      advisor: { enabled: true, modelId: 'reasoner', stages: ['plan', 'tools'], timeoutMs: 1200, maxChecksPerTurn: 2, maxInterventionsPerTurn: 1 },
+    }), 'utf8');
+
+    const loaded = loadConfig({ cwd: dir, env: { ADVISOR_KEY: 'test-key' }, skipGlobal: true, skipCredentials: true, logger: silent });
+    expect(loaded.config.advisor).toEqual({
+      enabled: true, modelId: 'reasoner', stages: ['plan', 'tools'], timeoutMs: 1200,
+      maxChecksPerTurn: 2, maxInterventionsPerTurn: 1,
+    });
+
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({ advisor: { enabled: true, modelId: 'missing' } }), 'utf8');
+    expect(() => loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent }))
+      .toThrowError(/unknown model ID: missing/);
   });
 
   it('读取项目配置文件并通过 apiKeyEnv 解析 API Key', async () => {
@@ -65,6 +91,32 @@ describe('loadConfig', () => {
     expect(loaded.config.model.apiKey).toBe('sk-test-key');
     expect(loaded.config.model.contextWindow).toBe(1_000_000);
     expect(loaded.config.security.mode).toBe('readonly');
+  });
+
+  it('legacy 单模型配置允许无密钥本地端点', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      model: { baseUrl: 'http://127.0.0.1:8000/v1', model: 'local-model' },
+    }), 'utf8');
+
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+
+    expect(loaded.config.models[0]).toMatchObject({ id: 'legacy-default', available: true, credentialSource: null });
+  });
+
+  it('保存到显式目录的 legacy-default 仍允许无密钥端点', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      model: { baseUrl: 'http://127.0.0.1:8000/v1', model: 'local-model' },
+      models: [{
+        id: 'legacy-default', protocol: 'openai-compatible', baseUrl: 'http://127.0.0.1:8000/v1',
+        apiKeyEnv: 'FORGEX_API_KEY', model: 'local-model', contextWindow: 32768, maxOutputTokens: 4096,
+        capabilities: ['chat'], costTier: 3, speedTier: 3,
+      }],
+      modelRoles: { default: 'legacy-default' },
+    }), 'utf8');
+
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+
+    expect(loaded.config.models[0]).toMatchObject({ id: 'legacy-default', available: true, credentialSource: null });
   });
 
   it('环境变量覆盖配置文件', async () => {
@@ -224,6 +276,52 @@ describe('loadConfig', () => {
       /不是合法 JSON/,
     );
   });
+
+  it('只在用户显式启用后配置持久代码执行器', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      tools: { codeExecution: { enabled: true, nodeCommand: 'node', pythonCommand: 'python3', timeoutMs: 12_000, maxOutputBytes: 48_000 } },
+    }), 'utf8');
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+    expect(loaded.config.tools.codeExecution).toEqual({
+      enabled: true,
+      nodeCommand: 'node',
+      pythonCommand: 'python3',
+      timeoutMs: 12_000,
+      maxOutputBytes: 48_000,
+    });
+  });
+
+  it('浏览器自动化必须显式配置可执行文件与精确站点 allowlist', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      tools: { browserAutomation: { enabled: true, command: 'chrome', allowedHosts: ['docs.example.com'], timeoutMs: 20_000 } },
+    }), 'utf8');
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+    expect(loaded.config.tools.browserAutomation).toEqual({
+      enabled: true,
+      command: 'chrome',
+      args: [],
+      allowedHosts: ['docs.example.com'],
+      timeoutMs: 20_000,
+    });
+  });
+
+  it('拒绝缺少浏览器命令或 allowlist 的启用配置', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      tools: { browserAutomation: { enabled: true, command: 'chrome' } },
+    }), 'utf8');
+    expect(() => loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent }))
+      .toThrow(/allowlist/);
+  });
+
+  it('解析显式 DAP adapter 配置并为可选参数提供默认值', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      tools: { debugAdapters: [{ id: 'debugpy', extensions: ['.py'], command: 'python', args: ['-m', 'debugpy.adapter'] }] },
+    }), 'utf8');
+    const loaded = loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+    expect(loaded.config.tools.debugAdapters).toEqual([{
+      id: 'debugpy', extensions: ['.py'], command: 'python', args: ['-m', 'debugpy.adapter'], launchArgs: {}, attachArgs: {},
+    }]);
+  });
 });
 
 describe('凭据文件兜底', () => {
@@ -349,5 +447,112 @@ describe('candidateConfigPaths', () => {
   it('skipGlobal 时不含全局配置', () => {
     const paths = candidateConfigPaths(dir, {}, { skipGlobal: true });
     expect(paths).toEqual([join(dir, 'forgex.config.json')]);
+  });
+});
+
+describe('多模型目录配置', () => {
+  const fastModel = {
+    id: 'groq-fast',
+    protocol: 'openai-compatible',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    apiKeyEnv: 'GROQ_API_KEY',
+    model: 'openai/gpt-oss-20b',
+    contextWindow: 131_072,
+    maxOutputTokens: 65_536,
+    capabilities: ['chat', 'cheap', 'fast'],
+    costTier: 1,
+    speedTier: 1,
+  };
+  const reasoningModel = {
+    id: 'openrouter-reasoning',
+    protocol: 'openai-compatible',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    apiKeyEnv: 'OPENROUTER_API_KEY',
+    model: 'openai/gpt-oss-120b',
+    contextWindow: 131_072,
+    maxOutputTokens: 65_536,
+    capabilities: ['chat', 'reasoning', 'coding'],
+    costTier: 3,
+    speedTier: 2,
+  };
+
+  it('parses multiple models and role mappings while preserving model metadata', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      models: [fastModel, reasoningModel],
+      modelRoles: { default: 'groq-fast', cheap: 'groq-fast', reasoning: 'openrouter-reasoning', coding: 'openrouter-reasoning' },
+    }), 'utf8');
+
+    const loaded = loadConfig({
+      cwd: dir,
+      env: { GROQ_API_KEY: 'groq-test-secret', OPENROUTER_API_KEY: 'openrouter-test-secret' },
+      skipGlobal: true,
+      skipCredentials: true,
+      logger: silent,
+    });
+
+    expect(loaded.modelConfigured).toBe(true);
+    expect(loaded.config.models.map((model) => model.id)).toEqual(['groq-fast', 'openrouter-reasoning']);
+    expect(loaded.config.models[0]).toMatchObject({
+      protocol: 'openai-compatible',
+      capabilities: ['chat', 'cheap', 'fast'],
+      costTier: 1,
+      speedTier: 1,
+      credentialSource: 'env',
+      available: true,
+    });
+    expect(loaded.config.models[0]?.config.apiKey).toBe('groq-test-secret');
+    expect(loaded.config.models[1]?.config.apiKey).toBe('openrouter-test-secret');
+    expect(loaded.config.modelRoles).toMatchObject({ default: 'groq-fast', reasoning: 'openrouter-reasoning' });
+  });
+
+  it('rejects duplicate model IDs and role mappings to unknown models', async () => {
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      models: [fastModel, { ...reasoningModel, id: 'groq-fast' }],
+      modelRoles: { default: 'missing-model' },
+    }), 'utf8');
+
+    expect(() => loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent }))
+      .toThrowError(/models\.1\.id|modelRoles\.default/);
+  });
+
+  it('resolves catalog credentials from environment or credential store, with environment precedence', async () => {
+    const credentialsPath = join(dir, 'credentials.json');
+    await writeFile(credentialsPath, JSON.stringify({ keys: {
+      GROQ_API_KEY: 'groq-from-file',
+      OPENROUTER_API_KEY: 'openrouter-from-file',
+    } }), 'utf8');
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      models: [fastModel, reasoningModel],
+    }), 'utf8');
+
+    const loaded = loadConfig({
+      cwd: dir,
+      env: { GROQ_API_KEY: 'groq-from-env' },
+      skipGlobal: true,
+      credentialsPath,
+      logger: silent,
+    });
+
+    expect(loaded.config.models[0]).toMatchObject({ available: true, credentialSource: 'env' });
+    expect(loaded.config.models[0]?.config.apiKey).toBe('groq-from-env');
+    expect(loaded.config.models[1]).toMatchObject({ available: true, credentialSource: 'credentials' });
+    expect(loaded.config.models[1]?.config.apiKey).toBe('openrouter-from-file');
+  });
+
+  it('rejects plaintext keys in catalog entries without echoing their value', async () => {
+    const secret = 'sk-catalog-test-secret-value';
+    await writeFile(join(dir, 'forgex.config.json'), JSON.stringify({
+      models: [{ ...fastModel, apiKey: secret }],
+    }), 'utf8');
+
+    let error: unknown;
+    try {
+      loadConfig({ cwd: dir, env: {}, skipGlobal: true, skipCredentials: true, logger: silent });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({ code: 'CONFIG_INVALID' });
+    expect(error instanceof Error ? error.message : '').not.toContain(secret);
   });
 });

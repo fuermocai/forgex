@@ -15,8 +15,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { ForgeError, createLogger, type Logger, type PermissionMode, type RemoteHostConfig } from '@forgex/shared';
-import type { ModelConfig } from '@forgex/models';
-import type { LspServerConfig } from '@forgex/tools';
+import { MODEL_CAPABILITIES, MODEL_ROLES, type ConfiguredModel, type ModelConfig, type ModelCredentialSource, type ModelRole } from '@forgex/models';
+import type { BrowserAutomationConfig, DebugAdapterConfig, LspServerConfig } from '@forgex/tools';
 import { PROVIDERS } from './providers.js';
 import { parsePermissionMode, permissionModeList } from './permission-mode.js';
 
@@ -38,6 +38,32 @@ const ModelSchema = z.object({
   headers: z.record(z.string()).optional(),
   name: z.string().optional(),
 });
+
+const ModelCatalogEntrySchema = z.object({
+  id: z.string().trim().min(1).max(128),
+  protocol: z.literal('openai-compatible').default('openai-compatible'),
+  baseUrl: z.string().url().refine((value) => /^https?:\/\//i.test(value), 'baseUrl must use HTTP or HTTPS'),
+  apiKeyEnv: z.string().trim().min(1).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  model: z.string().trim().min(1),
+  contextWindow: z.number().int().min(1024),
+  maxOutputTokens: z.number().int().min(256),
+  temperature: z.number().min(0).max(2).default(0.2),
+  timeoutMs: z.number().int().min(1000).max(600_000).default(120_000),
+  maxRetries: z.number().int().min(0).max(5).default(2),
+  stream: z.boolean().default(true),
+  name: z.string().optional(),
+  capabilities: z.array(z.enum(MODEL_CAPABILITIES)).min(1).default(['chat']),
+  costTier: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).default(3),
+  speedTier: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).default(3),
+}).strict();
+
+const ModelRolesSchema = z.object({
+  default: z.string().trim().min(1).optional(),
+  cheap: z.string().trim().min(1).optional(),
+  reasoning: z.string().trim().min(1).optional(),
+  coding: z.string().trim().min(1).optional(),
+  vision: z.string().trim().min(1).optional(),
+}).strict().default({});
 
 const RemoteHostSchema = z.object({
   host: z.string().min(1).max(253).regex(/^[a-zA-Z0-9._:-]+$/),
@@ -75,6 +101,22 @@ const AgentSchema = z.object({
   subagentMaxConcurrency: z.number().int().min(0).max(32).default(3),
 });
 
+const AdvisorSchema = z.object({
+  enabled: z.boolean().default(false),
+  modelId: z.string().trim().min(1).optional(),
+  stages: z.array(z.enum(['plan', 'tools', 'results', 'final'])).min(1).default(['plan', 'tools', 'results', 'final']),
+  timeoutMs: z.number().int().min(100).max(60_000).default(5_000),
+  maxChecksPerTurn: z.number().int().min(1).max(32).default(4),
+  maxInterventionsPerTurn: z.number().int().min(1).max(8).default(1),
+}).default({});
+
+const MemorySchema = z.object({
+  enabled: z.boolean().default(true),
+  path: z.string().trim().min(1).optional(),
+  autoRecall: z.boolean().default(true),
+  autoSave: z.boolean().default(false),
+}).default({});
+
 const LanguageServerSchema = z.object({
   id: z.string().min(1).max(64),
   extensions: z.array(z.string().startsWith('.')).min(1),
@@ -83,8 +125,40 @@ const LanguageServerSchema = z.object({
   args: z.array(z.string()).default([]),
 });
 
+const CodeExecutionSchema = z.object({
+  enabled: z.boolean().default(false),
+  nodeCommand: z.string().min(1).default('node'),
+  pythonCommand: z.string().min(1).default('python'),
+  timeoutMs: z.number().int().min(1000).max(600_000).default(30_000),
+  maxOutputBytes: z.number().int().min(4096).max(262_144).default(32_768),
+});
+
+const DebugAdapterSchema = z.object({
+  id: z.string().min(1).max(64),
+  extensions: z.array(z.string().startsWith('.')).min(1),
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  launchArgs: z.record(z.unknown()).default({}),
+  attachArgs: z.record(z.unknown()).default({}),
+});
+
+const BrowserAutomationSchema = z.object({
+  enabled: z.boolean().default(false),
+  command: z.string().min(1).optional(),
+  args: z.array(z.string()).default([]),
+  allowedHosts: z.array(z.string().min(1).max(253)).default([]),
+  timeoutMs: z.number().int().min(1000).max(60_000).default(20_000),
+}).superRefine((value, ctx) => {
+  if (!value.enabled) return;
+  if (!value.command) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['command'], message: 'enabled 时必须配置浏览器 command' });
+  if (value.allowedHosts.length === 0) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['allowedHosts'], message: 'enabled 时至少配置一个精确站点 allowlist' });
+});
+
 const ToolsSchema = z.object({
   languageServers: z.array(LanguageServerSchema).default([]),
+  codeExecution: CodeExecutionSchema.default({}),
+  debugAdapters: z.array(DebugAdapterSchema).default([]),
+  browserAutomation: BrowserAutomationSchema.default({}),
 });
 
 /**
@@ -100,17 +174,48 @@ const WorktreeSchema = z.object({
 
 const ConfigSchema = z.object({
   model: ModelSchema.default({}),
+  models: z.array(ModelCatalogEntrySchema).min(1).optional(),
+  modelRoles: ModelRolesSchema,
   security: SecuritySchema.default({}),
   session: SessionSchema.default({}),
   agent: AgentSchema.default({}),
   worktree: WorktreeSchema.default({}),
+  advisor: AdvisorSchema,
+  memory: MemorySchema,
   tools: ToolsSchema.default({}),
+}).superRefine((value, ctx) => {
+  const ids = new Set<string>();
+  for (const [index, model] of (value.models ?? []).entries()) {
+    if (ids.has(model.id)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['models', index, 'id'], message: 'model IDs must be unique' });
+    }
+    ids.add(model.id);
+  }
+  for (const role of MODEL_ROLES) {
+    const modelId = value.modelRoles[role];
+    if (modelId === undefined) continue;
+    const legacyTarget = value.models === undefined && role === 'default' && modelId === 'legacy-default';
+    if (!ids.has(modelId) && !legacyTarget) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['modelRoles', role], message: `unknown model ID: ${modelId}` });
+    }
+    if (value.models === undefined && role !== 'default') {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['modelRoles', role], message: 'non-default roles require a models catalog' });
+    }
+  }
+  if (value.advisor.modelId !== undefined) {
+    const legacyTarget = value.models === undefined && value.advisor.modelId === 'legacy-default';
+    if (!ids.has(value.advisor.modelId) && !legacyTarget) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['advisor', 'modelId'], message: `unknown model ID: ${value.advisor.modelId}` });
+    }
+  }
 });
 
 export type FileConfig = z.input<typeof ConfigSchema>;
 
 export interface ResolvedConfig {
   model: ModelConfig;
+  models: ConfiguredModel[];
+  modelRoles: Partial<Record<ModelRole, string>>;
   security: {
     mode: 'readonly' | 'standard' | 'trusted' | 'yolo';
     workspaceRoots: string[];
@@ -126,8 +231,34 @@ export interface ResolvedConfig {
   };
   session: { dbPath: string };
   agent: { maxIterations?: number; maxConcurrency: number; subagentMaxConcurrency: number };
+  advisor: {
+    enabled: boolean;
+    modelId?: string;
+    stages: Array<'plan' | 'tools' | 'results' | 'final'>;
+    timeoutMs: number;
+    maxChecksPerTurn: number;
+    maxInterventionsPerTurn: number;
+  };
+  memory: { enabled: boolean; path: string; autoRecall: boolean; autoSave: boolean };
   worktree: { root: string };
-  tools: { languageServers: LspServerConfig[] };
+  tools: {
+    languageServers: LspServerConfig[];
+    codeExecution: {
+      enabled: boolean;
+      nodeCommand: string;
+      pythonCommand: string;
+      timeoutMs: number;
+      maxOutputBytes: number;
+    };
+    debugAdapters: DebugAdapterConfig[];
+    browserAutomation: {
+      enabled: boolean;
+      command?: string;
+      args: string[];
+      allowedHosts: string[];
+      timeoutMs: number;
+    };
+  };
 }
 
 export interface LoadedConfig {
@@ -284,6 +415,50 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
     ...(value.model.name ? { name: value.model.name } : {}),
   };
 
+  const models: ConfiguredModel[] = value.models
+    ? value.models.map((entry) => {
+        const apiKey = env[entry.apiKeyEnv];
+        const credentialSource: ModelCredentialSource = apiKey
+          ? injectedFromCredentials.has(entry.apiKeyEnv) ? 'credentials' : 'env'
+          : null;
+        const modelConfig: ModelConfig = {
+          baseUrl: normalizeBaseUrl(entry.baseUrl),
+          model: entry.model,
+          apiKeyEnv: entry.apiKeyEnv,
+          contextWindow: entry.contextWindow,
+          maxOutputTokens: entry.maxOutputTokens,
+          temperature: entry.temperature,
+          timeoutMs: entry.timeoutMs,
+          maxRetries: entry.maxRetries,
+          stream: entry.stream,
+          ...(apiKey ? { apiKey } : {}),
+          ...(entry.name ? { name: entry.name } : {}),
+        };
+        return {
+          id: entry.id,
+          protocol: entry.protocol,
+          config: modelConfig,
+          capabilities: [...entry.capabilities],
+          costTier: entry.costTier,
+          speedTier: entry.speedTier,
+          credentialSource,
+          available: entry.id === 'legacy-default' || Boolean(apiKey),
+        };
+      })
+    : [{
+        id: 'legacy-default',
+        protocol: 'openai-compatible',
+        config: model,
+        capabilities: ['chat'],
+        costTier: 3,
+        speedTier: 3,
+        credentialSource: apiKeySource,
+        // The legacy model supports keyless OpenAI-compatible local endpoints.
+        available: true,
+      }];
+  const modelRoles: Partial<Record<ModelRole, string>> = { ...value.modelRoles };
+  modelRoles.default ??= models[0]?.id;
+
   const workspaceRoots = value.security.workspaceRoots.map((root) => resolveFrom(cwd, root));
   const writableRoots = (value.security.writableRoots ?? value.security.workspaceRoots).map((root) =>
     resolveFrom(cwd, root),
@@ -300,6 +475,8 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   return {
     config: {
       model,
+      models,
+      modelRoles,
       security: {
         mode: value.security.mode,
         workspaceRoots,
@@ -318,8 +495,20 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
         maxConcurrency: value.agent.maxConcurrency,
         subagentMaxConcurrency: value.agent.subagentMaxConcurrency,
       },
+      advisor: value.advisor,
+      memory: {
+        enabled: value.memory.enabled,
+        path: resolveFrom(cwd, value.memory.path ?? join('.forgex', 'memory.jsonl')),
+        autoRecall: value.memory.autoRecall,
+        autoSave: value.memory.autoSave,
+      },
       worktree: { root: resolveWorktreeRoot(value.worktree.root, cwd, env) },
-      tools: { languageServers: value.tools.languageServers },
+      tools: {
+        languageServers: value.tools.languageServers,
+        codeExecution: value.tools.codeExecution,
+        debugAdapters: value.tools.debugAdapters,
+        browserAutomation: value.tools.browserAutomation,
+      },
     },
     configPath,
     sources,
@@ -460,12 +649,14 @@ function detectProviderFromEnv(
   return null;
 }
 
-/** 判断模型是否被显式配置（而不是落到默认占位值） */function determineModelConfigured(
+/** 判断模型是否被显式配置（而不是落到默认占位值） */
+function determineModelConfigured(
   fileData: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
   parsed: z.output<typeof ConfigSchema>,
 ): boolean {
   if (env.FORGEX_BASE_URL || env.FORGEX_MODEL) return true;
+  if (Array.isArray(fileData.models) && fileData.models.length > 0) return true;
   const model = fileData.model;
   if (model && typeof model === 'object') {
     const record = model as Record<string, unknown>;

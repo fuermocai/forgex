@@ -86,5 +86,5 @@ export async function chatCommand(args: ParsedArgs, options: { cwd: string }): P
   await app.waitUntilExit();
   // 退出时取消仍未处理的审批，避免后台挂起 Promise
   bridge.cancel();
-  runtime.close();
+  await runtime.close();
 }

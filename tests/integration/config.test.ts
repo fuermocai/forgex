@@ -45,7 +45,7 @@ describe('参数解析', () => {
 describe('配置加载', () => {
   it('无配置文件时使用默认值并标记模型未配置', async () => {
     const cwd = await tempDir();
-    const loaded = loadConfig({ cwd, env: {}, skipGlobal: true });
+    const loaded = loadConfig({ cwd, env: {}, skipGlobal: true, skipCredentials: true });
     expect(loaded.modelConfigured).toBe(false);
     expect(loaded.configPath).toBeNull();
     expect(loaded.config.security.workspaceRoots).toEqual([resolve(cwd)]);

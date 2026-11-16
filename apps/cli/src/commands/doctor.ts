@@ -61,13 +61,32 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
       name: '模型配置',
       status: loaded.modelConfigured ? 'ok' : 'warn',
       detail: loaded.modelConfigured
-        ? `${loaded.config.model.model} @ ${loaded.config.model.baseUrl}`
+        ? (() => {
+            const primaryId = loaded!.config.modelRoles.default;
+            const primary = loaded!.config.models.find((model) => model.id === primaryId);
+            return `${primary?.config.model ?? loaded!.config.model.model} @ ${primary?.config.baseUrl ?? loaded!.config.model.baseUrl}`;
+          })()
         : '未配置 baseUrl/model，chat/run 不可用',
     });
+    if (loaded.config.models.some((model) => model.id !== 'legacy-default')) {
+      const ready = loaded.config.models.filter((model) => model.available);
+      const primaryId = loaded.config.modelRoles.default;
+      const primaryReady = loaded.config.models.find((model) => model.id === primaryId)?.available ?? false;
+      const missing = loaded.config.models.filter((model) => !model.available)
+        .map((model) => `${model.id} (${model.config.apiKeyEnv ?? 'API Key'})`).join(', ');
+      checks.push({
+        name: '模型目录',
+        status: primaryReady ? 'ok' : 'warn',
+        detail: `${ready.length}/${loaded.config.models.length} 个模型凭据就绪；default=${primaryId ?? '未设置'}${missing ? `；缺少凭据: ${missing}` : ''}`,
+      });
+    }
     // Key 单独一项：既能回答"到底配没配"，也能回答"重启后从哪读的"
     // ——排查「填了一次重开又没了」时，看来源比看有没有更直接。
-    const apiKey = loaded.config.model.apiKey;
-    const keyEnv = loaded.config.model.apiKeyEnv ?? 'FORGEX_API_KEY';
+    const primaryModelId = loaded.config.modelRoles.default;
+    const catalogPrimary = loaded.config.models.find((model) => model.id === primaryModelId);
+    const apiKey = catalogPrimary?.config.apiKey ?? loaded.config.model.apiKey;
+    const keyEnv = catalogPrimary?.config.apiKeyEnv ?? loaded.config.model.apiKeyEnv ?? 'FORGEX_API_KEY';
+    const apiKeySource = catalogPrimary?.credentialSource ?? loaded.apiKeySource;
     const sourceLabel: Record<Exclude<ApiKeySource, null>, string> = {
       env: '环境变量',
       credentials: `凭据文件 ${loaded.credentialsPath}`,
@@ -75,9 +94,9 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
     };
     checks.push({
       name: 'API Key',
-      status: apiKey ? (loaded.apiKeySource === 'file' ? 'warn' : 'ok') : 'warn',
+      status: apiKey ? (apiKeySource === 'file' ? 'warn' : 'ok') : 'warn',
       detail: apiKey
-        ? `${maskKey(apiKey)}（${loaded.apiKeySource ? sourceLabel[loaded.apiKeySource] : '来源未知'}）`
+        ? `${maskKey(apiKey)}（${apiKeySource ? sourceLabel[apiKeySource] : '来源未知'}）`
         : `未配置：/key <API Key> 或 export ${keyEnv}=...（凭据文件路径 ${loaded.credentialsPath}）`,
     });
     // 权限模式直接决定"能不能动手"，自检时必须让它可见：yolo 单独告警

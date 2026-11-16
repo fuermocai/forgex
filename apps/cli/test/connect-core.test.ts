@@ -2,6 +2,7 @@
  * /connect 与 /models 共用的纯函数测试（不发网络请求）。
  */
 import { describe, expect, it } from 'vitest';
+import { createProvider } from '@forgex/models';
 import {
   MODEL_PRESETS,
   PROVIDERS,
@@ -39,6 +40,43 @@ describe('resolveProvider', () => {
   it('未知名称落到 custom', () => {
     expect(resolveProvider('some-gateway')).toBe('custom');
     expect(resolveProvider('99')).toBe('custom');
+  });
+});
+
+describe('OpenAI-compatible provider catalog', () => {
+  it('sends compatible requests to Groq and OpenRouter endpoints without labeling them native protocols', async () => {
+    for (const providerKey of ['groq', 'openrouter'] as const) {
+      const preset = PROVIDERS[providerKey];
+      let requestUrl = '';
+      let requestInit: RequestInit | undefined;
+      const provider = createProvider({
+        baseUrl: preset.defaultBaseUrl,
+        apiKey: 'catalog-protocol-secret',
+        model: preset.defaultModel,
+        contextWindow: preset.contextWindow,
+        maxOutputTokens: preset.maxOutputTokens,
+        temperature: 0,
+        timeoutMs: 1000,
+        maxRetries: 0,
+        stream: false,
+        name: preset.name,
+      }, {
+        fetchImpl: async (input, init) => {
+          requestUrl = String(input);
+          requestInit = init;
+          return new Response(JSON.stringify({
+            choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        },
+      });
+
+      await provider.chat({ messages: [{ role: 'user', content: 'ping' }] });
+
+      expect(preset.protocol).toBe('openai-compatible');
+      expect(requestUrl).toBe(`${preset.defaultBaseUrl}/chat/completions`);
+      expect(requestInit?.headers).toMatchObject({ authorization: 'Bearer catalog-protocol-secret' });
+      expect(JSON.parse(String(requestInit?.body))).toMatchObject({ model: preset.defaultModel, stream: false });
+    }
   });
 });
 
@@ -254,6 +292,17 @@ describe('testConnectivity', () => {
     );
   });
 
+  it('支持无凭据的本地兼容端点诊断', async () => {
+    await withServer((req, res) => {
+      expect(req.headers.authorization).toBeUndefined();
+      res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'pong' } }] }));
+    }, async (baseUrl) => {
+      const result = await testConnectivity({ baseUrl, model: 'local-model' });
+      expect(result).toMatchObject({ ok: true, reason: 'ok' });
+    });
+  });
+
   it('401 返回 HTTP 状态与错误详情', async () => {
     await withServer(
       (_req, res) => {
@@ -267,6 +316,20 @@ describe('testConnectivity', () => {
         expect(result.detail).toBe('invalid api key');
       },
     );
+  });
+
+  it('redacts a key echoed by a connectivity failure', async () => {
+    await withServer((req, res) => {
+      const authorization = String(req.headers.authorization ?? '');
+      res.writeHead(401, { 'content-type': 'application/json', connection: 'close' });
+      res.end(JSON.stringify({ error: { message: `rejected ${authorization}` } }));
+    }, async (baseUrl) => {
+      const secret = 'sk-abcdefgh12345678';
+      const result = await testConnectivity({ baseUrl, apiKey: secret, model: 'fake-model' });
+      expect(result.ok).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(result.detail).toContain('***');
+    });
   });
 
   it('非 JSON 响应返回可读错误', async () => {

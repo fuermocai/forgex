@@ -10,8 +10,10 @@ import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { formatMs, type AgentEvent } from '@forgex/shared';
 import type { ForgeRuntime } from '../runtime/create-runtime.js';
+import { dispatchWorkerHubCommand, isWorkerHubCommand } from '../runtime/worker-hub.js';
+import { dispatchMemoryCommand, isMemoryCommand } from '../runtime/memory-command.js';
 import { MODEL_PRESETS } from '../runtime/connect-core.js';
-import { switchModel } from '../runtime/model-switch.js';
+import { checkModelConnectivity, formatConfiguredModels, switchModel, switchModelRole } from '../runtime/model-switch.js';
 import { applyApiKey, currentApiKeyEnv } from '../runtime/api-key.js';
 import { parsePermissionMode, permissionModeHelp, permissionModeList } from '../config/permission-mode.js';
 import type { ApprovalBridge } from './approval-bridge.js';
@@ -23,8 +25,9 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
   bridge.onRequest((request) => {
     void (async () => {
       const command = request.preview ? `\n  ${request.preview}` : '';
+      const review = request.previewMustBeReviewed ? `\n  [完整审批预览，共 ${request.preview?.length ?? 0} 个字符；上方内容未截断]` : '';
       const answer = await rl.question(
-        `\n[审批] ${request.tool}（${request.riskLevel}）: ${request.reason}${command}\n批准执行？(y/N) `,
+        `\n[审批] ${request.tool}（${request.riskLevel}）: ${request.reason}${command}${review}\n批准执行？(y/N) `,
       );
       bridge.respond(/^y(es)?$/i.test(answer.trim()));
     })();
@@ -49,7 +52,7 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
   stdout.write(
     [
       'ForgeX 交互模式（纯文本）',
-      `模型: ${runtime.config.model.model}  工作区: ${runtime.settings.workspaceRoots[0]}`,
+      `模型: ${agent.modelName} (${agent.modelRole ?? 'default'})  工作区: ${runtime.settings.workspaceRoots[0]}`,
       `权限模式: ${runtime.settings.mode}  会话: ${agent.sessionId}`,
       ...(runtime.config.model.apiKey
         ? []
@@ -66,6 +69,22 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
     if (text === '/exit' || text === '/quit') {
       if (busy && controller) controller.abort();
       break;
+    }
+    if (isWorkerHubCommand(text)) {
+      void dispatchWorkerHubCommand(runtime, text).then((message) => {
+        stdout.write(`${message}\n`);
+      }).catch((err: unknown) => {
+        stdout.write(`[错误] Agent Hub 命令失败：${err instanceof Error ? err.message : String(err)}\n`);
+      });
+      continue;
+    }
+    if (isMemoryCommand(text)) {
+      void dispatchMemoryCommand(runtime, text).then((message) => {
+        stdout.write(`${message}\n`);
+      }).catch((err: unknown) => {
+        stdout.write(`[错误] Memory 命令失败：${err instanceof Error ? err.message : String(err)}\n`);
+      });
+      continue;
     }
     if (busy) {
       if (text === '/queue') {
@@ -133,21 +152,25 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
     if (text === '/models' || text.startsWith('/models ')) {
       const target = text.slice('/models'.length).trim();
       if (!target) {
-        stdout.write(
-          [
-            '可用模型：',
-            ...MODEL_PRESETS.map(
-              (preset, index) =>
-                `  ${index + 1}. ${preset.model} — ${preset.label}${preset.model === agent.modelName ? '（当前）' : ''}`,
-            ),
-            `当前: ${agent.modelName}`,
-            '切换: /models <模型名>',
-            '',
-          ].join('\n'),
-        );
+        stdout.write(`${formatConfiguredModels(runtime)}\n\n预设模型：\n${MODEL_PRESETS.map((preset) => `  ${preset.model} — ${preset.label}`).join('\n')}\n`);
         continue;
       }
       try {
+        const [operation, ...parts] = target.split(/\s+/);
+        if (operation === 'role') {
+          const [role, modelId] = parts;
+          if (!role) throw new Error('用法: /models role <角色> [model-id]');
+          const result = switchModelRole(runtime, role, modelId);
+          stdout.write(`[提示] 已切换 ${result.role} 角色: ${result.modelId} (${result.model})${result.saved ? '（配置已保存）' : '（本次会话生效，配置未保存）'}\n`);
+          continue;
+        }
+        if (operation === 'check') {
+          const modelId = parts[0];
+          if (!modelId) throw new Error('用法: /models check <model-id>');
+          const result = await checkModelConnectivity(runtime, modelId);
+          stdout.write(`[${result.ok ? '正常' : '失败'}] ${modelId}: ${result.reason}${result.detail ? `（${result.detail}）` : ''}${result.latencyMs !== undefined ? ` ${result.latencyMs}ms` : ''}\n`);
+          continue;
+        }
         const result = switchModel(runtime, target);
         stdout.write(
           `[提示] 已切换模型: ${result.model} @ ${result.baseUrl}` +
@@ -233,7 +256,7 @@ export async function runPlainChat(runtime: ForgeRuntime, bridge: ApprovalBridge
   if (activeRun) await activeRun;
   off();
   rl.close();
-  runtime.close();
+  await runtime.close();
 }
 
 function printEvent(event: AgentEvent, state: { streamed: boolean }): void {
@@ -263,6 +286,22 @@ function printEvent(event: AgentEvent, state: { streamed: boolean }): void {
     case 'notice':
       stdout.write(`[提示] ${event.message}\n`);
       break;
+    case 'model:response':
+      if (event.fallbackReason) stdout.write(`[模型回退] ${event.modelName} (${event.modelId})：${event.fallbackReason}\n`);
+      break;
+    case 'advisor:review':
+      if (event.verdict === 'warn' || event.verdict === 'block') {
+        stdout.write(`[Advisor ${event.verdict}] (${event.stage}) ${event.reason}\n`);
+      }
+      break;
+    case 'worker:state':
+      stdout.write(`[Worker ${event.status}] ${event.workerId} ${event.name}: ${event.progress}\n`);
+      break;
+    case 'worker:progress': {
+      const usage = event.usage ? ` · ${event.usage.totalTokens} tokens / ${event.usage.toolCalls} 工具` : '';
+      stdout.write(`[Worker] ${event.workerId}: ${event.progress}${usage}\n`);
+      break;
+    }
     case 'approval:resolved':
       stdout.write(`[审批] ${event.decision === 'approved' ? '已批准' : '已拒绝/超时'}\n`);
       break;
@@ -275,7 +314,17 @@ function printHelp(extensionCommands: ReadonlyArray<{ name: string; description:
   stdout.write(
     [
       '可用命令：',
-      '  /models [模型名]  查看可用模型 / 切换模型',
+      '  /models           查看已配置模型与角色',
+      '  /models role <角色> [model-id]  切换任务角色/指定模型',
+      '  /models check <model-id>       检查模型凭据与连通性',
+      '  /models <模型名>  旧式模型切换',
+      '  /workers          查看 worker 状态与资源用量',
+      '  /memory           管理项目记忆：list/search/show/edit/forget/clear/export/candidates/approve/reject',
+      '  /worker <id> [transcript] 查看 worker 摘要；指定 transcript 才显示对话',
+      '  /steer <id> <指令> 向运行中的 worker 发送指令',
+      '  /cancel-worker <id> 取消 worker',
+      '  /retry-worker <id> 重试已结束的 worker',
+      '  /wait-worker <id> 等待 worker 结束',
       '  /key <API Key>    直接填写或替换当前模型的 API Key',
       '  /mode [模式]      查看或切换权限模式（/mode plan、/mode agent 控制计划模式）',
       '  /plan             进入或退出计划模式（只读，只出计划）',

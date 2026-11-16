@@ -10,6 +10,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { redactText } from '@forgex/shared';
+import type { ModelRole } from '@forgex/models';
 
 /* ------------------------------------------------------------------ */
 /* Provider 预设（定义在 config/providers，这里保留 re-export）          */
@@ -82,7 +84,7 @@ export interface ConnectivityResult {
 
 export async function testConnectivity(cfg: {
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
   model: string;
   timeoutMs?: number;
 }): Promise<ConnectivityResult> {
@@ -103,7 +105,10 @@ export async function testConnectivity(cfg: {
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
+      },
       body,
       signal: controller.signal,
     });
@@ -120,7 +125,7 @@ export async function testConnectivity(cfg: {
       } catch {
         detail = text.slice(0, 200);
       }
-      return { ok: false, reason: `HTTP ${res.status}`, detail, latencyMs };
+      return { ok: false, reason: `HTTP ${res.status}`, detail: sanitizeConnectivityText(detail, cfg.apiKey ?? ''), latencyMs };
     }
 
     try {
@@ -128,18 +133,22 @@ export async function testConnectivity(cfg: {
       if (Array.isArray(json.choices) && json.choices.length > 0) {
         return { ok: true, reason: 'ok', latencyMs };
       }
-      return { ok: false, reason: '响应格式异常', detail: text.slice(0, 200), latencyMs };
+      return { ok: false, reason: '响应格式异常', detail: sanitizeConnectivityText(text.slice(0, 200), cfg.apiKey ?? ''), latencyMs };
     } catch {
-      return { ok: false, reason: '响应无法解析', detail: text.slice(0, 200), latencyMs };
+      return { ok: false, reason: '响应无法解析', detail: sanitizeConnectivityText(text.slice(0, 200), cfg.apiKey ?? ''), latencyMs };
     }
   } catch (err) {
     if ((err as Error).name === 'AbortError') {
       return { ok: false, reason: `${timeout / 1000}s 超时`, detail: '请检查 baseUrl 或网络' };
     }
-    return { ok: false, reason: (err as Error).message };
+    return { ok: false, reason: sanitizeConnectivityText((err as Error).message, cfg.apiKey ?? '') };
   } finally {
     clearTimeout(timer);
   }
+}
+
+function sanitizeConnectivityText(text: string, apiKey: string): string {
+  return apiKey ? redactText(text).replaceAll(apiKey, '***') : redactText(text);
 }
 
 /* ------------------------------------------------------------------ */
@@ -151,6 +160,7 @@ export function defaultConfigPath(): string {
 }
 
 export interface ExistingConfig {
+  [key: string]: unknown;
   model: {
     baseUrl: string;
     model: string;
@@ -204,6 +214,7 @@ export function buildConfig(
   patch: { baseUrl: string; model: string; envName: string; contextWindow?: number; maxOutputTokens?: number },
 ): Record<string, unknown> {
   return {
+    ...existing,
     model: {
       ...existing.model,
       baseUrl: patch.baseUrl,
@@ -212,9 +223,6 @@ export function buildConfig(
       ...(patch.contextWindow !== undefined ? { contextWindow: patch.contextWindow } : {}),
       ...(patch.maxOutputTokens !== undefined ? { maxOutputTokens: patch.maxOutputTokens } : {}),
     },
-    security: existing.security,
-    session: existing.session,
-    agent: existing.agent,
   };
 }
 
@@ -269,12 +277,62 @@ export function writeModelSelection(
     );
     const existingEnv = typeof model.apiKeyEnv === 'string' ? model.apiKeyEnv : undefined;
     model.apiKeyEnv = patch.apiKeyEnv ?? matched?.apiKeyEnv ?? existingEnv ?? 'FORGEX_API_KEY';
-    writeJsonConfig(target, {
+    const oldRoles = existing.modelRoles && typeof existing.modelRoles === 'object' && !Array.isArray(existing.modelRoles)
+      ? existing.modelRoles as Record<string, unknown>
+      : {};
+    const config: Record<string, unknown> = {
+      ...existing,
       model,
-      security: existing.security,
-      session: existing.session,
-      agent: existing.agent,
-    });
+      modelRoles: { ...oldRoles, default: 'legacy-default' },
+    };
+    if (Array.isArray(existing.models)) {
+      const legacyEntry = {
+        id: 'legacy-default',
+        protocol: 'openai-compatible',
+        baseUrl: patch.baseUrl,
+        apiKeyEnv: String(model.apiKeyEnv),
+        model: patch.model,
+        contextWindow: patch.contextWindow,
+        maxOutputTokens: patch.maxOutputTokens,
+        temperature: Number(existing.model.temperature ?? 0.2),
+        timeoutMs: Number(existing.model.timeoutMs ?? 120_000),
+        maxRetries: Number(existing.model.maxRetries ?? 2),
+        stream: Boolean(existing.model.stream ?? true),
+        capabilities: ['chat'],
+        costTier: 3,
+        speedTier: 3,
+      };
+      config.models = [...existing.models.filter((entry) =>
+        !entry || typeof entry !== 'object' || (entry as Record<string, unknown>).id !== 'legacy-default'), legacyEntry];
+    }
+    writeJsonConfig(target, config);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Persist role targets while retaining the complete existing model catalog and other settings. */
+export function writeModelRoleSelection(
+  path: string | null,
+  roles: Partial<Record<ModelRole, string>>,
+): boolean {
+  const target = path ?? defaultConfigPath();
+  let existing: Record<string, unknown> = {};
+  if (existsSync(target)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(target, 'utf8').replace(/^\uFEFF/, ''));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+      existing = parsed as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+  }
+  const oldRoles = existing.modelRoles && typeof existing.modelRoles === 'object' && !Array.isArray(existing.modelRoles)
+    ? existing.modelRoles as Record<string, unknown>
+    : {};
+  try {
+    writeJsonConfig(target, { ...existing, modelRoles: { ...oldRoles, ...roles } });
     return true;
   } catch {
     return false;
