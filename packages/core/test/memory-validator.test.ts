@@ -85,7 +85,7 @@ describe('detectSensitiveContent', () => {
 
 describe('validateMemoryInput', () => {
   it('合法输入通过', () => {
-    expect(() => validateMemoryInput(makeInput())).not.toThrow();
+    expect(() => validateMemoryInput(makeInput({ evidence_refs: ['user:explicit'] }))).not.toThrow();
     expect(() =>
       validateMemoryInput(
         makeInput({
@@ -98,6 +98,11 @@ describe('validateMemoryInput', () => {
         }),
       ),
     ).not.toThrow();
+  });
+
+  it('project 记忆必须包含至少一条来源证据', () => {
+    expectErrorCode(() => validateMemoryInput(makeInput()), 'MEMORY_INVALID');
+    expectErrorCode(() => validateMemoryInput(makeInput({ evidence_refs: [] })), 'MEMORY_INVALID');
   });
 
   it('key 格式非法抛 MEMORY_INVALID', () => {
@@ -127,7 +132,7 @@ describe('validateMemoryInput', () => {
       'MEMORY_INVALID',
     );
     expect(() =>
-      validateMemoryInput(makeInput({ content: '汉'.repeat(1000) })),
+      validateMemoryInput(makeInput({ content: '汉'.repeat(1000), evidence_refs: ['user:unicode'] })),
     ).not.toThrow();
   });
 
@@ -158,7 +163,7 @@ describe('validateMemoryInput', () => {
   it('content 含 API key 抛 MEMORY_SENSITIVE_CONTENT 且不回显原文', () => {
     const secret = 'sk-abcdefghijklmnop1234';
     const { message } = expectErrorCode(
-      () => validateMemoryInput(makeInput({ content: `我的 key 是 ${secret}` })),
+      () => validateMemoryInput(makeInput({ content: `我的 key 是 ${secret}`, evidence_refs: ['user:sensitive-test'] })),
       'MEMORY_SENSITIVE_CONTENT',
     );
     expect(message).not.toContain(secret);

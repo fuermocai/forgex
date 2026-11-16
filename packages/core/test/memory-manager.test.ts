@@ -9,6 +9,9 @@
  *   - purgeSession 只清理 session/task 级记忆
  */
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryManager, createMemoryManager } from '../src/memory/memory-manager.js';
 
 const WS = '/repo/test';
@@ -24,6 +27,9 @@ describe('MemoryManager', () => {
     manager.close();
   });
 
+  const rememberTestUserFact = (input: Parameters<MemoryManager['rememberUserFact']>[0]) =>
+    manager.rememberUserFact({ ...input, evidence_refs: input.evidence_refs ?? ['test:user-fact'] });
+
   it('remember 写入合法记忆并可 recall', () => {
     const result = manager.remember({
       kind: 'fact',
@@ -33,6 +39,7 @@ describe('MemoryManager', () => {
       content: 'pnpm build && pnpm test',
       workspace: WS,
       tags: ['build'],
+      evidence_refs: ['user:build-command'],
     });
     expect(result.conflict).toBe(false);
 
@@ -51,6 +58,7 @@ describe('MemoryManager', () => {
         key: 'db.config',
         content: 'password= supersecret123',
         workspace: WS,
+        evidence_refs: ['tool:test'],
       });
     } catch (err) {
       code = (err as { code?: string }).code ?? '';
@@ -84,6 +92,7 @@ describe('MemoryManager', () => {
       key: 'k',
       content: 'to be forgotten',
       workspace: WS,
+      evidence_refs: ['user:forget'],
     });
     expect(manager.forget(entry.id)).toBe(true);
     expect(manager.forget(entry.id)).toBe(false); // 幂等
@@ -97,14 +106,14 @@ describe('MemoryManager', () => {
   });
 
   it('rememberUserFact 绕过 conflict 直接覆盖', () => {
-    manager.rememberUserFact({
+    rememberTestUserFact({
       scope: 'project',
       key: 'prod.branch',
       content: 'main',
       workspace: WS,
       confidence: 1.0,
     });
-    const update = manager.rememberUserFact({
+    const update = rememberTestUserFact({
       scope: 'project',
       key: 'prod.branch',
       content: 'trunk',
@@ -117,7 +126,7 @@ describe('MemoryManager', () => {
   });
 
   it('agent 来源写入与 user 冲突时 conflict=true', () => {
-    manager.rememberUserFact({
+    rememberTestUserFact({
       scope: 'project',
       key: 'prod.branch',
       content: 'main',
@@ -132,6 +141,7 @@ describe('MemoryManager', () => {
       content: 'master',
       workspace: WS,
       confidence: 0.6,
+      evidence_refs: ['tool:conflict-test'],
     });
     expect(attempt.conflict).toBe(true);
     expect(manager.count(WS)).toBe(1);
@@ -145,6 +155,7 @@ describe('MemoryManager', () => {
       key: 'keep',
       content: 'project level',
       workspace: WS,
+      evidence_refs: ['user:project-level'],
     });
     manager.remember({
       kind: 'fact',
@@ -182,5 +193,57 @@ describe('MemoryManager', () => {
       code = (err as { code?: string }).code ?? '';
     }
     expect(code).toBe('MEMORY_INVALID');
+  });
+
+  it('lists and searches only the selected workspace', () => {
+    rememberTestUserFact({ scope: 'project', key: 'build.command', content: 'pnpm build', workspace: WS });
+    rememberTestUserFact({ scope: 'project', key: 'build.command', content: 'npm run build', workspace: '/repo/other' });
+
+    expect(manager.list(WS).map((entry) => entry.content)).toEqual(['pnpm build']);
+    expect(manager.search(WS, 'pnpm').map((hit) => hit.entry.content)).toEqual(['pnpm build']);
+    expect(manager.search(WS, 'yarn')).toEqual([]);
+  });
+
+  it('updates by superseding the previous entry', () => {
+    const first = rememberTestUserFact({ scope: 'project', key: 'deploy.branch', content: 'main', workspace: WS }).entry;
+
+    expect(() => manager.update(first.id, { content: 'release' })).toThrow(/新的证据引用/);
+    const updated = manager.update(first.id, { content: 'release', evidence_refs: ['user:release-correction'] });
+
+    expect(updated.entry.id).not.toBe(first.id);
+    expect(manager.get(first.id)?.superseded_by).toBe(updated.entry.id);
+    expect(manager.list(WS).find((entry) => entry.key === 'deploy.branch')?.content).toBe('release');
+  });
+
+  it('exports project memory history as JSON', () => {
+    const first = rememberTestUserFact({ scope: 'project', key: 'tooling.package-manager', content: 'npm', workspace: WS }).entry;
+    manager.update(first.id, { content: 'pnpm', evidence_refs: ['user:package-manager-correction'] });
+
+    const exported = JSON.parse(manager.exportProject(WS)) as { workspace: string; entries: Array<{ content: string; superseded_by?: string }> };
+
+    expect(exported.workspace).toBe(WS);
+    expect(exported.entries).toHaveLength(2);
+    expect(exported.entries.find((entry) => entry.content === 'npm')?.superseded_by).toBeDefined();
+  });
+
+  it('recovers after a corrupted final JSONL line', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'forgex-memory-recover-'));
+    const dbPath = join(dir, 'memory.jsonl');
+    try {
+      const initial = createMemoryManager(dbPath);
+      initial.rememberUserFact({ scope: 'project', key: 'build.command', content: 'pnpm test', workspace: WS, evidence_refs: ['user:test-command'] });
+      initial.close();
+      const corruptRecord = '{"password":"supersecretvalue"} trailing-invalid-record';
+      await appendFile(dbPath, corruptRecord, 'utf8');
+
+      const recovered = createMemoryManager(dbPath);
+      expect(recovered.list(WS).map((entry) => entry.content)).toEqual(['pnpm test']);
+      recovered.close();
+      const quarantined = await readFile(`${dbPath}.corrupt`, 'utf8');
+      expect(quarantined).toContain('sha256=');
+      expect(quarantined).not.toContain('supersecretvalue');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

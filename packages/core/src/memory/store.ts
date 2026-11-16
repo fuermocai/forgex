@@ -1,6 +1,8 @@
 /** JSONL persistence for project memory entries. */
+import { createHash } from 'node:crypto';
 import { ForgeError, JsonlEventStore } from '@forgex/shared';
-import type { MemoryEntry, MemoryScope } from './types.js';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import type { MemoryCandidate, MemoryCandidateStatus, MemoryEntry, MemoryScope } from './types.js';
 
 /** Optional filters for memory lookup. */
 export interface MemoryQuery {
@@ -18,6 +20,7 @@ export class MemoryStore {
   private readonly events: JsonlEventStore;
 
   constructor(path: string) {
+    recoverFinalCorruptRecord(path);
     this.events = new JsonlEventStore(path);
   }
 
@@ -72,6 +75,37 @@ export class MemoryStore {
     return this.readEntries(includeSuperseded).filter((entry) => entry.workspace === workspace).length;
   }
 
+  insertCandidate(candidate: MemoryCandidate): void {
+    if (this.getCandidate(candidate.id)) {
+      throw new ForgeError('MEMORY_STORE_ERROR', `记忆候选 ID 已存在: ${candidate.id}`);
+    }
+    this.events.append('memory.candidate.proposed', { candidate });
+  }
+
+  getCandidate(id: string): MemoryCandidate | null {
+    return this.readCandidates().find((candidate) => candidate.id === id) ?? null;
+  }
+
+  listCandidates(filter: { workspace: string; session_id?: string; status?: MemoryCandidateStatus }): MemoryCandidate[] {
+    return this.readCandidates().filter((candidate) =>
+      candidate.workspace === filter.workspace
+      && (filter.session_id === undefined || candidate.session_id === filter.session_id)
+      && (filter.status === undefined || candidate.status === filter.status))
+      .sort((left, right) => right.created_at.localeCompare(left.created_at));
+  }
+
+  setCandidateStatus(id: string, status: MemoryCandidateStatus, memoryId?: string): boolean {
+    const current = this.getCandidate(id);
+    if (!current || current.status !== 'pending') return false;
+    this.events.append('memory.candidate.updated', {
+      candidateId: id,
+      status,
+      updatedAt: new Date().toISOString(),
+      ...(memoryId ? { memoryId } : {}),
+    });
+    return true;
+  }
+
   close(): void { /* JSONL appends are synchronous and require no flush. */ }
 
   private readEntries(includeSuperseded: boolean): MemoryEntry[] {
@@ -94,4 +128,77 @@ export class MemoryStore {
     const entries = [...records.values()];
     return includeSuperseded ? entries : entries.filter((entry) => entry.superseded_by === undefined);
   }
+
+  private readCandidates(): MemoryCandidate[] {
+    const records = new Map<string, MemoryCandidate>();
+    for (const event of this.events.readAll()) {
+      if (event.type === 'memory.candidate.proposed') {
+        const candidate = event.data.candidate;
+        if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+          const value = JSON.parse(JSON.stringify(candidate)) as MemoryCandidate;
+          records.set(value.id, value);
+        }
+      }
+      if (event.type === 'memory.candidate.updated' && typeof event.data.candidateId === 'string') {
+        const current = records.get(event.data.candidateId);
+        if (current && isCandidateStatus(event.data.status) && typeof event.data.updatedAt === 'string') {
+          current.status = event.data.status;
+          current.updated_at = event.data.updatedAt;
+          if (typeof event.data.memoryId === 'string') current.memory_id = event.data.memoryId;
+        }
+      }
+    }
+    return [...records.values()];
+  }
+}
+
+function isCandidateStatus(value: unknown): value is MemoryCandidateStatus {
+  return value === 'pending' || value === 'approved' || value === 'rejected';
+}
+
+/** Keep the shared event log strict; memory alone may quarantine one corrupt trailing record. */
+function recoverFinalCorruptRecord(path: string): void {
+  if (path === ':memory:' || !existsSync(path)) return;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new ForgeError('MEMORY_STORE_ERROR', '无法读取项目记忆存储', { cause: error, details: { path } });
+  }
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (!line.trim()) continue;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (!isJsonlEvent(value)) throw new TypeError('invalid event record');
+    } catch (error) {
+      if (lines.slice(index + 1).some((tail) => tail.trim().length > 0)) {
+        throw new ForgeError('MEMORY_STORE_ERROR', `项目记忆文件第 ${index + 1} 行损坏`, {
+          cause: error, details: { path, line: index + 1 },
+        });
+      }
+      try {
+        const digest = createHash('sha256').update(line).digest('hex');
+        appendFileSync(`${path}.corrupt`, `line=${index + 1} bytes=${Buffer.byteLength(line, 'utf8')} sha256=${digest}\n`, 'utf8');
+        const validPrefix = lines.slice(0, index).join('\n').trimEnd();
+        writeFileSync(path, validPrefix ? `${validPrefix}\n` : '', 'utf8');
+      } catch (repairError) {
+        throw new ForgeError('MEMORY_STORE_ERROR', '无法隔离损坏的项目记忆末行', {
+          cause: repairError, details: { path, line: index + 1 },
+        });
+      }
+      return;
+    }
+  }
+}
+
+function isJsonlEvent(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const event = value as Record<string, unknown>;
+  return typeof event.id === 'string'
+    && (typeof event.parentId === 'string' || event.parentId === null)
+    && typeof event.ts === 'string'
+    && typeof event.type === 'string'
+    && Boolean(event.data && typeof event.data === 'object' && !Array.isArray(event.data));
 }

@@ -129,6 +129,10 @@ export function validateMemoryInput(input: CreateMemoryInput): void {
     throw new ForgeError('MEMORY_INVALID', 'workspace 不能为空');
   }
 
+  if (input.scope === 'project' && (!input.evidence_refs || input.evidence_refs.length === 0)) {
+    throw new ForgeError('MEMORY_INVALID', '项目记忆必须至少包含一条来源证据');
+  }
+
   // 敏感内容：content 与 key 都检（key 也可能带 secret）
   const contentHit = detectSensitiveContent(input.content);
   if (contentHit !== null) {

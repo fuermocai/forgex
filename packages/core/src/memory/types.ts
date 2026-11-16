@@ -152,6 +152,20 @@ export interface CreateMemoryInput {
   evidence_refs?: string[];
 }
 
+export type MemoryCandidateStatus = 'pending' | 'approved' | 'rejected';
+
+/** A reviewable, non-active memory proposal linked to its originating session. */
+export interface MemoryCandidate {
+  id: string;
+  session_id: string;
+  workspace: string;
+  input: CreateMemoryInput;
+  status: MemoryCandidateStatus;
+  created_at: string;
+  updated_at: string;
+  memory_id?: string;
+}
+
 /**
  * 构造 MemoryEntry。
  *

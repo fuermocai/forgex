@@ -6,6 +6,7 @@ import {
   type RunMetrics,
 } from '@forgex/shared';
 import type { AuditEvent, AuditSink } from '@forgex/security';
+import type { ModelRole } from '@forgex/models';
 import { JsonlEventStore, type JsonlEvent } from './jsonl-event-store.js';
 
 export interface SessionRecord {
@@ -14,13 +15,15 @@ export interface SessionRecord {
   updatedAt: string;
   workspace: string;
   model: string;
+  modelId?: string;
+  modelRole?: ModelRole;
   title: string | null;
   status: string;
   parentSessionId?: string;
   parentMessageId?: string;
 }
-export interface CreateSessionInput { workspace: string; model: string; title?: string; id?: string; parentSessionId?: string; parentMessageId?: string; }
-export interface UpdateSessionPatch { title?: string; status?: string; model?: string; }
+export interface CreateSessionInput { workspace: string; model: string; modelId?: string; modelRole?: ModelRole; title?: string; id?: string; parentSessionId?: string; parentMessageId?: string; }
+export interface UpdateSessionPatch { title?: string; status?: string; model?: string; modelId?: string; modelRole?: ModelRole; }
 type Row = Record<string, unknown>;
 
 export class SessionStore implements AuditSink {
@@ -37,6 +40,8 @@ export class SessionStore implements AuditSink {
     const record: SessionRecord = {
       id: input.id ?? newSessionId(), createdAt: now, updatedAt: now,
       workspace: input.workspace, model: input.model, title: input.title ?? null, status: 'active',
+      ...(input.modelId ? { modelId: input.modelId } : {}),
+      ...(input.modelRole ? { modelRole: input.modelRole } : {}),
       ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
     };
@@ -86,6 +91,10 @@ export class SessionStore implements AuditSink {
       .map((event) => ({ id: event.id, message: event.data.message as ChatMessage }));
   }
 
+  listUserMessageEntries(sessionId: string): Array<{ id: string; message: ChatMessage }> {
+    return this.listMessageEntries(sessionId).filter((entry) => entry.message.role === 'user');
+  }
+
   forkSession(sessionId: string, messageId?: string, newId?: string): SessionRecord {
     const source = this.getSession(sessionId);
     if (!source) throw new ForgeError('SESSION_ERROR', `源会话不存在: ${sessionId}`);
@@ -93,7 +102,9 @@ export class SessionStore implements AuditSink {
     const index = messageId === undefined ? entries.length - 1 : entries.findIndex((entry) => entry.id === messageId);
     if (messageId !== undefined && index < 0) throw new ForgeError('SESSION_ERROR', `分支起点不存在: ${messageId}`);
     const forkPoint = index >= 0 ? entries[index]!.id : undefined;
-    const branch = this.createSession({ workspace: source.workspace, model: source.model, title: source.title ? `${source.title} (branch)` : undefined,
+    const branch = this.createSession({ workspace: source.workspace, model: source.model,
+      ...(source.modelId ? { modelId: source.modelId } : {}), ...(source.modelRole ? { modelRole: source.modelRole } : {}),
+      title: source.title ? `${source.title} (branch)` : undefined,
       ...(newId ? { id: newId } : {}), parentSessionId: sessionId, ...(forkPoint ? { parentMessageId: forkPoint } : {}) });
     for (const entry of entries.slice(0, index + 1)) this.appendMessage(branch.id, entry.message);
     return branch;
@@ -111,6 +122,18 @@ export class SessionStore implements AuditSink {
   getLatestMetrics(sessionId: string): RunMetrics | null {
     const event = this.latestEvents().findLast((item) => item.type === 'metrics.recorded' && item.data.sessionId === sessionId);
     return (event?.data.metrics as RunMetrics | undefined) ?? null;
+  }
+
+  recordWorkerEvent(parentSessionId: string, workerId: string, event: string, data: Row = {}): void {
+    this.appendEvent(`subagent.worker.${event}`, { ...data, parentSessionId, workerId });
+  }
+
+  getWorkerEvents(parentSessionId: string, workerId: string): JsonlEvent[] {
+    return this.latestEvents().filter((event) =>
+      event.type.startsWith('subagent.worker.')
+      && event.data.parentSessionId === parentSessionId
+      && event.data.workerId === workerId,
+    );
   }
 
   /** Used by the task/checkpoint JSONL adapters to share this same event stream. */

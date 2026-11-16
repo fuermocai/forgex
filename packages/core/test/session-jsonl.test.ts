@@ -57,6 +57,16 @@ describe('JSONL session event store', () => {
     expect(reopened.readEvents().every((event) => event.id.length > 0 && typeof event.ts === 'string')).toBe(true);
   });
 
+  it('persists requested model role and actual routed model across reopen', () => {
+    const path = join(tempDir(), 'events.jsonl');
+    const store = new SessionStore(path);
+    const session = store.createSession({ workspace: 'repo', model: 'legacy', modelId: 'primary', modelRole: 'coding' });
+    store.updateSession(session.id, { model: 'backup-model', modelId: 'backup', modelRole: 'coding' });
+
+    const reopened = new SessionStore(path);
+    expect(reopened.getSession(session.id)).toMatchObject({ model: 'backup-model', modelId: 'backup', modelRole: 'coding' });
+  });
+
   it('fails closed on malformed JSONL instead of silently dropping corrupted events', () => {
     const dir = tempDir();
     const path = join(dir, 'events.jsonl');
