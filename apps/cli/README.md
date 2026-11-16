@@ -44,13 +44,19 @@ forgex
 
 | 命令 | 作用 |
 | --- | --- |
-| `/models` | 切换模型；也支持 `/models deepseek-v4-pro` |
+| `/models` | 查看已配置模型、切换任务角色或检查连通性 |
+| `/models role <角色> [model-id]` | 切换 default/cheap/reasoning/coding/vision 角色 |
+| `/models check <model-id>` | 检查凭据并测试模型连通性 |
 | `/mode [模式]` | 查看/切换权限模式（readonly / standard / trusted / yolo），`Shift+Tab` 循环 |
 | `/plan` | 进入/退出计划模式：只读分析，不改文件、不执行命令 |
 | `/connect` | 配置 Provider、API Key、模型，并测试连通性 |
 | `/key <API Key>` | 保存 API Key（持久化到凭据文件，重开会话仍可用） |
 | `/context` | 查看当前上下文 token 估算 |
 | `/session` | 查看当前会话 ID |
+| `/workers`、`/worker <id>` | 查看本地 worker 状态、资源用量和摘要 |
+| `/steer <id> <指令>`、`/cancel-worker <id>` | 指引或取消运行中的 worker |
+| `/retry-worker <id>`、`/wait-worker <id>` | 重试或等待 worker |
+| `/memory ...` | 查看、搜索、修改、导出和审核项目记忆 |
 | `/help` | 查看帮助 |
 | `/exit` | 退出（`/quit` 同义） |
 
@@ -106,7 +112,57 @@ forgex config                   # 查看最终生效配置（Key 脱敏）
 }
 ```
 
-支持任意 OpenAI-compatible 接口；Provider 预设见 `forgex connect`。
+支持 OpenAI-compatible Chat Completions 接口；目前不会将兼容端点冒充为原生 Provider。Provider 预设见 `forgex connect`。多个模型可在 `models` 中配置，并通过 `modelRoles` 为不同任务指定模型：
+
+```json
+{
+  "models": [
+    {
+      "id": "main",
+      "baseUrl": "https://api.example.com/v1",
+      "apiKeyEnv": "FORGEX_API_KEY",
+      "model": "coding-model",
+      "contextWindow": 128000,
+      "maxOutputTokens": 8192,
+      "capabilities": ["chat", "coding", "reasoning"],
+      "costTier": 3,
+      "speedTier": 3
+    }
+  ],
+  "modelRoles": {
+    "default": "main",
+    "coding": "main",
+    "reasoning": "main"
+  }
+}
+```
+
+旧式 `model` 配置仍然可用。`/models check <model-id>` 可在实际任务前检查连通性；凭据只从指定环境变量或现有凭据文件读取。
+
+### Worker Hub 与 Advisor
+
+父 Agent 可将独立任务派发给本地 worker。每个 worker 在隔离 Git worktree 中运行，Hub 提供状态、进度、用量、摘要和 transcript 查看，以及 steer/cancel/retry/wait 控制；产物需要审阅，不会自动合并。Hub 仅管理本地父子 Agent，不提供远程实时共享会话。
+
+Advisor 默认关闭。启用后可按轮检查计划、工具调用、工具结果和最终答复，输出提醒或阻塞意见；Advisor 失败或超时不会阻塞主 Agent。可用 `advisor.modelId` 指定已配置模型，否则使用 reasoning 角色或默认模型。
+
+### 项目记忆
+
+项目记忆默认开启，按工作区隔离，默认写入启动目录下的 `.forgex/memory.jsonl`。设置 `memory.enabled` 为 `false` 可完全关闭记忆读写；`autoRecall` 可单独关闭召回，`autoSave` 默认关闭。以 `记住：...` 或 `remember: ...` 开头的明确陈述会生成待审核候选，不会直接成为长期记忆。审核命令：
+
+```text
+/memory candidates
+/memory approve <candidate-id>
+/memory reject <candidate-id>
+```
+
+`/memory list|search|show|edit|forget|export` 用于管理当前工作区的记忆；`/memory clear confirm` 软删除当前工作区活动记忆并保留历史。修正会创建新版本并标记旧版本为 superseded。敏感内容会被过滤，写入会保留来源和证据引用。
+
+### 编码与外部工具
+
+- LSP 支持诊断、符号、定义、引用、hover、code actions 和 rename；WorkspaceEdit 先显示逐文件 diff，再由独立写入工具申请审批后应用。
+- 可配置持久 Python/JavaScript 会话和 DAP adapter；每次执行/调试操作需审批，输出限长。它们以 ForgeX 当前 OS 用户权限运行，不是 OS 沙箱。
+- `web_search` 使用 DuckDuckGo，`github_query` 只读查询 GitHub API。浏览器自动化默认关闭；启用时要求配置浏览器和精确主机 allowlist，使用无凭据临时 profile，每次操作都需审批。
+- 高风险工具的完整审批预览必须可核对；预览过长或需要脱敏时会拒绝操作。
 
 ## 安全说明
 

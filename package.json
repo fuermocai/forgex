@@ -1,6 +1,6 @@
 {
   "name": "forgex",
-  "version": "0.5.8",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "ForgeX - TUI-first coding & DevOps agent runtime",
