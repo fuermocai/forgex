@@ -6,6 +6,8 @@
  */
 export interface ProviderPreset {
   name: string;
+  /** This directory entry uses the generic adapter; it is not a native protocol implementation. */
+  protocol: 'openai-compatible';
   defaultBaseUrl: string;
   defaultModel: string;
   apiKeyEnv: string;
@@ -16,6 +18,7 @@ export interface ProviderPreset {
 export const PROVIDERS: Record<string, ProviderPreset> = {
   deepseek: {
     name: 'DeepSeek',
+    protocol: 'openai-compatible',
     defaultBaseUrl: 'https://api.deepseek.com',
     defaultModel: 'deepseek-flash',
     apiKeyEnv: 'DEEPSEEK_API_KEY',
@@ -24,6 +27,7 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
   },
   qwen: {
     name: 'Qwen (DashScope compatible-mode)',
+    protocol: 'openai-compatible',
     defaultBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     defaultModel: 'qwen-plus',
     apiKeyEnv: 'DASHSCOPE_API_KEY',
@@ -32,14 +36,34 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
   },
   openai: {
     name: 'OpenAI',
+    protocol: 'openai-compatible',
     defaultBaseUrl: 'https://api.openai.com/v1',
     defaultModel: 'gpt-4o-mini',
     apiKeyEnv: 'OPENAI_API_KEY',
     contextWindow: 128_000,
     maxOutputTokens: 16_384,
   },
+  groq: {
+    name: 'Groq (OpenAI-compatible)',
+    protocol: 'openai-compatible',
+    defaultBaseUrl: 'https://api.groq.com/openai/v1',
+    defaultModel: 'openai/gpt-oss-20b',
+    apiKeyEnv: 'GROQ_API_KEY',
+    contextWindow: 131_072,
+    maxOutputTokens: 65_536,
+  },
+  openrouter: {
+    name: 'OpenRouter (OpenAI-compatible)',
+    protocol: 'openai-compatible',
+    defaultBaseUrl: 'https://openrouter.ai/api/v1',
+    defaultModel: 'openai/gpt-oss-120b',
+    apiKeyEnv: 'OPENROUTER_API_KEY',
+    contextWindow: 131_072,
+    maxOutputTokens: 65_536,
+  },
   custom: {
     name: '自定义兼容端点（vLLM / Ollama / 内网网关）',
+    protocol: 'openai-compatible',
     defaultBaseUrl: 'http://127.0.0.1:8000/v1',
     defaultModel: 'local-model',
     apiKeyEnv: 'FORGEX_API_KEY',

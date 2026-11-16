@@ -2,6 +2,7 @@
  * ModelRouter 测试（v0.5.0 Phase 5）。
  */
 import { describe, it, expect } from 'vitest';
+import { ForgeError } from '@forgex/shared';
 import { ModelRouter } from '../src/model-router.js';
 import type { ModelProvider } from '../src/types.js';
 
@@ -23,6 +24,22 @@ describe('ModelRouter', () => {
 
     const p = router.select({ requiredCapabilities: ['coding'] });
     expect(p.name).toBe('ds-v3');
+  });
+
+  it('requiredCapabilities 必须全部满足', () => {
+    const router = new ModelRouter();
+    router.register({ id: 'one', provider: makeMockProvider('one'), capabilities: ['chat', 'coding'], tier: 1 });
+    router.register({ id: 'two', provider: makeMockProvider('two'), capabilities: ['chat', 'reasoning'], tier: 2 });
+
+    expect(router.select({ requiredCapabilities: ['chat', 'reasoning'] }).name).toBe('two');
+  });
+
+  it('跳过目录中凭据不可用的模型', () => {
+    const router = new ModelRouter();
+    router.register({ id: 'missing-key', provider: makeMockProvider('missing-key'), capabilities: ['chat'], tier: 1, available: false });
+    router.register({ id: 'ready', provider: makeMockProvider('ready'), capabilities: ['chat'], tier: 2, available: true });
+
+    expect(router.select({ requiredCapabilities: ['chat'] }).name).toBe('ready');
   });
 
   it('capability 不匹配抛 MODEL_CAPABILITY_MISMATCH', () => {
@@ -84,6 +101,29 @@ describe('ModelRouter', () => {
     } catch (e) { err = e; }
     expect(err).not.toBeNull();
     expect(err.code).toBe('MODEL_FALLBACK_EXHAUSTED');
+  });
+
+  it('用户取消不会冷却模型或尝试下一个 fallback', async () => {
+    const router = new ModelRouter();
+    router.register({ id: 'primary', provider: makeMockProvider('p'), capabilities: ['chat'], tier: 1 });
+    router.register({ id: 'backup', provider: makeMockProvider('b'), capabilities: ['chat'], tier: 2 });
+    const calls: string[] = [];
+
+    await expect(router.executeWithFallbackDetailed({ requiredCapabilities: ['chat'] }, async (_provider, descriptor) => {
+      calls.push(descriptor.id);
+      throw new ForgeError('PROVIDER_ABORTED', 'cancelled');
+    })).rejects.toMatchObject({ code: 'PROVIDER_ABORTED' });
+
+    expect(calls).toEqual(['primary']);
+    expect(router.select({ requiredCapabilities: ['chat'] }).name).toBe('p');
+  });
+
+  it('回退耗尽的错误会脱敏尝试详情', async () => {
+    const router = new ModelRouter();
+    router.register({ id: 'a', provider: makeMockProvider('a'), capabilities: ['chat'], tier: 1 });
+    await expect(router.executeWithFallback({ requiredCapabilities: ['chat'] }, async () => {
+      throw new Error('authorization: sk-abcdefgh12345678');
+    })).rejects.toThrow('sk-***');
   });
 
   it('listModels 返回已注册列表', () => {

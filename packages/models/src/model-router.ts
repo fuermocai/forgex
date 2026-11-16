@@ -7,10 +7,8 @@
  *   - 不引入密钥，配置由上层注入；
  *   - 回退耗尽抛 MODEL_FALLBACK_EXHAUSTED。
  */
-import { ForgeError } from '@forgex/shared';
-import type { ModelProvider } from './types.js';
-
-export type ModelCapability = 'coding' | 'vision' | 'reasoning' | 'chat' | 'fast' | 'cheap' | 'large-context';
+import { ForgeError, isAbortError, redactText } from '@forgex/shared';
+import type { ModelCapability, ModelProvider } from './types.js';
 
 export interface ModelDescriptor {
   /** 模型唯一 ID */
@@ -21,15 +19,32 @@ export interface ModelDescriptor {
   capabilities: ModelCapability[];
   /** 成本/延迟等级：1=最低 5=最高 */
   tier: 1 | 2 | 3 | 4 | 5;
+  /** Configured-catalog readiness; omitted descriptors remain available for compatibility. */
+  available?: boolean;
+  contextWindow?: number;
+  costTier?: 1 | 2 | 3 | 4 | 5;
+  speedTier?: 1 | 2 | 3 | 4 | 5;
 }
 
 export interface RoutingRequest {
-  /** 需要的能力（任一匹配即可） */
+  /** Every requested capability must be present on a candidate model. */
   requiredCapabilities?: ModelCapability[];
   /** 优先 tier（越小越便宜快） */
   preferTier?: number;
   /** 最大容忍 tier */
   maxTier?: number;
+  /** Preferred candidate, with capability-compatible fallbacks behind it. */
+  primaryModelId?: string;
+  /** Reject models whose context window cannot fit the prepared request. */
+  minimumContextWindow?: number;
+  /** Which configured quality axis should order fallbacks. */
+  prefer?: 'cost' | 'speed';
+}
+
+export interface RoutedExecution<T> {
+  result: T;
+  model: ModelDescriptor;
+  fallbackReason?: string;
 }
 
 export class ModelRouter {
@@ -59,9 +74,9 @@ export class ModelRouter {
 
   /** 选择最合适的模型 provider */
   select(request: RoutingRequest): ModelProvider {
-    const candidates = this.sortCandidates(this.filterCandidates(request), request);
+    const matching = this.filterCandidates(request);
 
-    if (candidates.length === 0) {
+    if (matching.length === 0) {
       throw new ForgeError(
         'MODEL_CAPABILITY_MISMATCH',
         `没有匹配能力的模型：${request.requiredCapabilities?.join(',') ?? '无约束'}`,
@@ -70,6 +85,10 @@ export class ModelRouter {
     }
 
     // 冷却中的模型不参与本次选择；全部不可用时明确失败。
+    const candidates = this.sortCandidates(matching.filter((model) => model.available !== false), request);
+    if (candidates.length === 0) {
+      throw new ForgeError('MODEL_UNAVAILABLE', '匹配的模型缺少可用凭据', { details: { available: matching.map((c) => c.id) } });
+    }
     const now = Date.now();
     const pick = candidates.find((c) => {
       const h = this.health.get(c.id)!;
@@ -80,7 +99,7 @@ export class ModelRouter {
       throw new ForgeError(
         'MODEL_UNAVAILABLE',
         '所有模型都在冷却中，暂时无法选择',
-        { details: { available: candidates.map((c) => c.id) } },
+      { details: { available: candidates.map((c) => c.id) } },
       );
     }
 
@@ -94,6 +113,14 @@ export class ModelRouter {
     request: RoutingRequest,
     fn: (provider: ModelProvider) => Promise<T>,
   ): Promise<T> {
+    return (await this.executeWithFallbackDetailed(request, (provider) => fn(provider))).result;
+  }
+
+  /** Like executeWithFallback, with the selected model and sanitized fallback cause. */
+  async executeWithFallbackDetailed<T>(
+    request: RoutingRequest,
+    fn: (provider: ModelProvider, descriptor: ModelDescriptor) => Promise<T>,
+  ): Promise<RoutedExecution<T>> {
     const matching = this.filterCandidates(request);
     if (matching.length === 0) {
       throw new ForgeError(
@@ -102,8 +129,12 @@ export class ModelRouter {
         { details: { available: [...this.models.keys()] } },
       );
     }
+    const ready = matching.filter((model) => model.available !== false);
+    if (ready.length === 0) {
+      throw new ForgeError('MODEL_UNAVAILABLE', '匹配的模型缺少可用凭据', { details: { available: matching.map((c) => c.id) } });
+    }
     const now = Date.now();
-    const candidates = this.sortCandidates(matching.filter((c) => {
+    const candidates = this.sortCandidates(ready.filter((c) => {
       const h = this.health.get(c.id)!;
       return h.consecutiveFails === 0 || now - h.lastFailAt >= this.failCooldownMs;
     }), request);
@@ -114,19 +145,24 @@ export class ModelRouter {
 
     for (const c of candidates) {
       try {
-        const result = await fn(c.provider);
+        const result = await fn(c.provider, c);
         this.markSucceeded(c.id);
-        return result;
+        return {
+          result,
+          model: c,
+          ...(errors.length > 0 ? { fallbackReason: errors.join('; ') } : {}),
+        };
       } catch (err) {
+        if (isAbortError(err)) throw err;
         this.markFailed(c.id);
-        errors.push(`${c.id}: ${err instanceof Error ? err.message : String(err)}`);
+        errors.push(redactText(`${c.id}: ${err instanceof Error ? err.message : String(err)}`));
       }
     }
 
     throw new ForgeError(
       'MODEL_FALLBACK_EXHAUSTED',
       `所有匹配模型都失败：${errors.join('；')}`,
-      { details: { errors, request } },
+      { details: { errors, request: { ...request, primaryModelId: request.primaryModelId } } },
     );
   }
 
@@ -135,8 +171,11 @@ export class ModelRouter {
 
     if (request.requiredCapabilities && request.requiredCapabilities.length > 0) {
       result = result.filter((m) =>
-        request.requiredCapabilities!.some((cap) => m.capabilities.includes(cap)),
+        request.requiredCapabilities!.every((cap) => m.capabilities.includes(cap)),
       );
+    }
+    if (request.minimumContextWindow !== undefined) {
+      result = result.filter((m) => m.contextWindow === undefined || m.contextWindow >= request.minimumContextWindow!);
     }
     if (request.maxTier !== undefined) {
       result = result.filter((m) => m.tier <= request.maxTier!);
@@ -150,6 +189,21 @@ export class ModelRouter {
 
   private sortCandidates(candidates: ModelDescriptor[], request: RoutingRequest): ModelDescriptor[] {
     return candidates.sort((a, b) => {
+      if (request.primaryModelId) {
+        const primaryA = a.id === request.primaryModelId ? 0 : 1;
+        const primaryB = b.id === request.primaryModelId ? 0 : 1;
+        if (primaryA !== primaryB) return primaryA - primaryB;
+      }
+      if (request.prefer === 'cost') {
+        const costA = a.costTier ?? a.tier;
+        const costB = b.costTier ?? b.tier;
+        if (costA !== costB) return costA - costB;
+      }
+      if (request.prefer === 'speed') {
+        const speedA = a.speedTier ?? a.tier;
+        const speedB = b.speedTier ?? b.tier;
+        if (speedA !== speedB) return speedA - speedB;
+      }
       const tierA = request.preferTier === undefined ? a.tier : Math.abs(a.tier - request.preferTier);
       const tierB = request.preferTier === undefined ? b.tier : Math.abs(b.tier - request.preferTier);
       if (tierA !== tierB) return tierA - tierB;
@@ -161,5 +215,9 @@ export class ModelRouter {
 
   listModels(): string[] {
     return [...this.models.keys()];
+  }
+
+  getModel(id: string): ModelDescriptor | undefined {
+    return this.models.get(id);
   }
 }

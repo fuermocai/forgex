@@ -6,6 +6,14 @@
 
 import type { ChatMessage, JsonValue, ToolCall } from '@forgex/shared';
 
+export const MODEL_ROLES = ['default', 'cheap', 'reasoning', 'coding', 'vision'] as const;
+export type ModelRole = (typeof MODEL_ROLES)[number];
+
+export const MODEL_CAPABILITIES = ['coding', 'vision', 'reasoning', 'chat', 'fast', 'cheap', 'large-context'] as const;
+export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
+export type ModelProtocol = 'openai-compatible';
+export type ModelCredentialSource = 'env' | 'credentials' | 'file' | null;
+
 export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
@@ -48,6 +56,18 @@ export interface ModelConfig {
   name?: string;
 }
 
+/** Configured model catalog entry plus runtime-only credential readiness. */
+export interface ConfiguredModel {
+  id: string;
+  protocol: ModelProtocol;
+  config: ModelConfig;
+  capabilities: ModelCapability[];
+  costTier: 1 | 2 | 3 | 4 | 5;
+  speedTier: 1 | 2 | 3 | 4 | 5;
+  credentialSource: ModelCredentialSource;
+  available: boolean;
+}
+
 export interface ChatRequest {
   messages: ChatMessage[];
   tools?: ModelToolSpec[];
@@ -64,6 +84,10 @@ export interface ChatResponse {
   usage: TokenUsage;
   /** 是否实际使用了流式（便于指标判断） */
   streamed: boolean;
+  /** Populated by routed providers with the model that actually answered. */
+  modelId?: string;
+  modelName?: string;
+  fallbackReason?: string;
 }
 
 /** 流式回调。所有回调都是可选的，失败不应影响主流程。 */
@@ -76,6 +100,10 @@ export interface StreamHandlers {
 export interface ModelProvider {
   readonly name: string;
   readonly config: Readonly<ModelConfig>;
+  readonly currentModelRole?: ModelRole;
+  readonly currentModelId?: string;
+  setModelRole?(role: ModelRole): void;
+  setRoleModel?(role: ModelRole, modelId: string): void;
   chat(request: ChatRequest, handlers?: StreamHandlers): Promise<ChatResponse>;
 }
 

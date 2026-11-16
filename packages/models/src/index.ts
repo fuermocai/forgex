@@ -1,6 +1,8 @@
 export * from './types.js';
 export * from './openai-compatible.js';
-export * from './model-router.js';
+export { ModelRouter } from './model-router.js';
+export type { ModelDescriptor, RoutedExecution, RoutingRequest } from './model-router.js';
+export { RoutedModelProvider } from './routed-provider.js';
 
 import type { Logger } from '@forgex/shared';
 import { OpenAICompatibleProvider } from './openai-compatible.js';
