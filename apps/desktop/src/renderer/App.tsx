@@ -220,7 +220,6 @@ export default function App() {
     : session
       ? <ChatView key={session.id} messages={messages} streamingText={streamingText} tools={tools} busy={busy} error={error} notice={notice} onSend={(text) => void sendMessage(text)} onCancel={() => void window.forgex.cancelTurn()} />
       : <section className="empty-state">
-          <div className="eyebrow">本地 AI 开发环境</div>
           <h1>{project ? '开始新的项目会话' : '从一个项目开始'}</h1>
           <p>{project ? '此项目没有其他会话，可以新建一个干净的会话继续工作。' : '选取本机项目文件夹，ForgeX 会在现有权限和沙箱设置下协助你工作。'}</p>
           <button className="project-button" onClick={() => project ? requestOpenProject(project) : void chooseProject()} disabled={starting}>{starting ? '正在打开…' : project ? '新建会话' : '选择项目文件夹'}</button>
@@ -230,15 +229,25 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand-mark">F</div>
-        <div><strong>ForgeX</strong><span className="subtitle">桌面编码 Agent</span></div>
-        <div className="project-title">{project?.name ?? '未选择项目'}</div>
-        <button className="settings-button" onClick={() => setShowSetup(true)} title="模型设置">模型设置</button>
-        <span className="version">{state ? `v${state.version}` : ''}</span>
+        <div className="brand-lockup">
+          <div className="brand-mark" aria-hidden="true">F</div>
+          <strong>ForgeX</strong>
+        </div>
+        <div className="project-title" title={project?.path}>
+          <span className="project-context-label">当前项目</span>
+          <strong>{project?.name ?? '未选择项目'}</strong>
+          {project && <span className="project-path">{project.path}</span>}
+        </div>
+        <div className="topbar-actions">
+          <button className="settings-button" onClick={() => setShowSetup(true)} title="模型设置">模型设置</button>
+          <span className="version">{state ? `v${state.version}` : ''}</span>
+        </div>
       </header>
       <div className="workspace-layout">
         <aside className="sidebar">
-          <button className="new-project-button" onClick={() => project ? requestOpenProject(project) : void chooseProject()} disabled={starting}>＋ 新建会话</button>
+          <button className="new-project-button" onClick={() => project ? requestOpenProject(project) : void chooseProject()} disabled={starting}>
+            <span className="new-session-mark" aria-hidden="true">+</span>新建会话
+          </button>
           <ProjectPicker projects={recentProjects} activePath={project?.path ?? null} disabled={starting} onOpen={(item) => requestOpenProject(item)} />
           {project && <SessionList
             sessions={sessions}
@@ -260,7 +269,7 @@ export default function App() {
           {approval && <ApprovalDialog key={approval.id} request={approval} queueLength={approvalQueue.length} onResolve={(decision) => void resolveApproval(decision)} />}
       {pendingNavigation && <div className="modal-backdrop navigation-backdrop">
         <section className="navigation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="navigation-title">
-          <div className="eyebrow">{busy ? '任务仍在运行' : '切换目标'}</div>
+          <div className="dialog-context">{busy ? '任务仍在运行' : '切换目标'}</div>
           <h2 id="navigation-title">{busy ? '切换后会取消当前任务' : '要切换到此目标吗？'}</h2>
           <p>目标：{pendingNavigation.sessionId ? '打开另一个会话' : pendingNavigation.project.name}</p>
           <div className="setup-actions">

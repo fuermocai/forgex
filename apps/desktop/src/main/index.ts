@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import { join } from 'node:path';
 import { registerShellIpcHandlers } from './ipc-handlers.js';
 import { DesktopRuntime } from './desktop-runtime.js';
@@ -13,7 +13,15 @@ async function createWindow(): Promise<void> {
     height: 840,
     minWidth: 880,
     minHeight: 600,
-    backgroundColor: '#10131a',
+    backgroundColor: '#10151c',
+    ...(process.platform === 'win32' ? {
+      titleBarStyle: 'hidden' as const,
+      titleBarOverlay: {
+        color: '#171e27',
+        symbolColor: '#9aa8b8',
+        height: 40,
+      },
+    } : {}),
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.cjs'),
       contextIsolation: true,
@@ -52,6 +60,7 @@ async function createWindow(): Promise<void> {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'win32') Menu.setApplicationMenu(null);
   void createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow();

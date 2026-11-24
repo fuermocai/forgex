@@ -36,7 +36,6 @@ export function SetupScreen(props: { state: DesktopAppState | null; onConnected(
   return (
     <div className="setup-wrap">
       <div className="setup-card">
-        <div className="eyebrow">模型连接</div>
         <h2>连接你的模型</h2>
         <p>模型配置写入 {props.state?.modelConfigPath ?? '~/.forgex/config.json'}。凭据保存在 ForgeX 本机凭据存储；验证通过后才启用会话。</p>
         <form onSubmit={(event) => void connect(event)}>

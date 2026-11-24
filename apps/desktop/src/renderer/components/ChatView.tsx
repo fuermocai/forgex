@@ -58,7 +58,7 @@ export function ChatView(props: {
   return (
     <div className="chat-view">
       <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
-        {props.messages.length === 0 && !props.busy && <div className="chat-empty"><span>✳</span><h2>你想在这个项目里做什么？</h2><p>描述目标、问题或需要实现的功能。</p></div>}
+        {props.messages.length === 0 && !props.busy && <div className="chat-empty"><h2>你想在这个项目里做什么？</h2><p>描述目标、问题或需要实现的功能。</p></div>}
         {props.messages.map((message) => <article className={`message ${message.role}`} key={message.id}>
           <div className="message-role">{message.role === 'user' ? '你' : 'ForgeX'}</div>
           <div className="message-content">{message.role === 'assistant' ? <MarkdownMessage content={message.content} /> : message.content}</div>

@@ -84,12 +84,12 @@ export function SessionList(props: {
               ) : (
                 <>
                   <button className="session-open" disabled={props.opening} onClick={() => props.onOpen(session)} title={session.id}>
-                    <span className="session-icon">◇</span>
+                    <span className="session-icon" aria-hidden="true" />
                     <span className="list-row-label">{session.title || session.model || '新会话'}</span>
                   </button>
                   <div className="session-actions">
-                    <button type="button" title="重命名会话" aria-label={`重命名 ${session.title || '会话'}`} disabled={props.opening} onClick={() => beginRename(session)}>✎</button>
-                    <button type="button" title={cannotDelete ? '任务运行期间不能删除当前会话' : '删除会话'} aria-label={`删除 ${session.title || '会话'}`} disabled={props.opening || cannotDelete} onClick={() => { setEditingId(null); setDeletingId(session.id); }}>⌫</button>
+                    <button type="button" title="重命名会话" aria-label={`重命名 ${session.title || '会话'}`} disabled={props.opening} onClick={() => beginRename(session)}>改名</button>
+                    <button type="button" title={cannotDelete ? '任务运行期间不能删除当前会话' : '删除会话'} aria-label={`删除 ${session.title || '会话'}`} disabled={props.opening || cannotDelete} onClick={() => { setEditingId(null); setDeletingId(session.id); }}>删除</button>
                   </div>
                 </>
               )}

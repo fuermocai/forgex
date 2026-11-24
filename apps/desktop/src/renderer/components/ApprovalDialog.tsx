@@ -9,7 +9,7 @@ export function ApprovalDialog(props: { request: DesktopApprovalRequest; queueLe
   return (
     <div className="modal-backdrop">
       <section className="approval-dialog" role="dialog" aria-modal="true" aria-labelledby="approval-title">
-        <div className="eyebrow">需要你的确认 · {props.request.riskLevel}{props.queueLength > 1 ? ` · 待处理 ${props.queueLength} 项` : ''}</div>
+        <div className="dialog-context">需要你的确认 · {props.request.riskLevel}{props.queueLength > 1 ? ` · 待处理 ${props.queueLength} 项` : ''}</div>
         <h2 id="approval-title">允许 ForgeX 执行 {props.request.tool}？</h2>
         <p>{props.request.reason}</p>
         <div className="approval-details"><strong>参数</strong><pre>{JSON.stringify(props.request.input, null, 2)}</pre></div>
