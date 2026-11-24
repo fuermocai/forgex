@@ -9,6 +9,8 @@ import type { GitFileEntry, GitStatusResult } from '../shared/desktop-api.js';
 
 const GIT_TIMEOUT_MS = 15_000;
 const GIT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const GIT_PATH_QUERY_BYTES = 64 * 1024;
+const FILE_DIRECTORY_CONFLICT = '所选 Git 路径与其他文件存在文件和目录冲突，无法单独更新暂存状态';
 const MAX_GIT_PATH_LENGTH = 4096;
 const MAX_GIT_BATCH_LENGTH = 16_000;
 const MAX_GIT_PATH_COUNT = 256;
@@ -143,16 +145,17 @@ export class DesktopGitService {
         throw new Error('Git 文件状态已变更，请刷新后重试');
       }
       if (hasFileDirectoryConflict(files, changedPaths)) {
-        throw new Error('所选 Git 路径与其他文件存在文件和目录冲突，无法单独更新暂存状态');
+        throw new Error(FILE_DIRECTORY_CONFLICT);
       }
       const head = action === 'unstage'
         ? (await git(['rev-parse', '--verify', '--quiet', 'HEAD'], 'head-missing')).trim()
         : '';
       const pathspecs = literalPathspecs(files);
+      await checkIndexAndTreePaths(git, files, head);
       if (action === 'stage') {
         await git(['add', '--', ...pathspecs]);
       } else if (head) {
-        await git(['restore', '--staged', '--', ...pathspecs]);
+        await git(['restore', `--source=${head}`, '--staged', '--', ...pathspecs]);
       } else {
         // Without HEAD, remove only the selected index entries, even when
         // their staged content differs from the current working tree files.
@@ -175,7 +178,8 @@ export class DesktopGitService {
 }
 
 type ExpectedGitExit = 'diff-found' | 'head-missing';
-type GitCommand = (args: string[], expectedExit?: ExpectedGitExit) => Promise<string>;
+type GitCommandMode = ExpectedGitExit | 'path-query';
+type GitCommand = (args: string[], mode?: GitCommandMode) => Promise<string>;
 
 async function openRepository(root: string): Promise<GitCommand> {
   const canonicalRoot = await realpath(root).catch(() => {
@@ -185,7 +189,7 @@ async function openRepository(root: string): Promise<GitCommand> {
     throw new Error('当前项目的 Git 工作区路径已变更');
   }
   const executable = await findGitExecutable();
-  const git: GitCommand = (args, expectedExit) => runGit(executable, root, args, expectedExit);
+  const git: GitCommand = (args, mode) => runGit(executable, root, args, mode);
   const output = await git(['rev-parse', '--show-toplevel']);
   const topLevel = output.replace(IS_WINDOWS ? /\r?\n$/ : /\n$/, '');
   if (!isAbsolute(topLevel)) {
@@ -222,7 +226,7 @@ async function findGitExecutable(): Promise<string> {
   throw new Error('找不到 Git 可执行程序，请安装 Git 并将其加入 PATH');
 }
 
-function runGit(executable: string, cwd: string, args: string[], expectedExit?: ExpectedGitExit): Promise<string> {
+function runGit(executable: string, cwd: string, args: string[], mode?: GitCommandMode): Promise<string> {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     const name = key.toUpperCase();
@@ -244,12 +248,12 @@ function runGit(executable: string, cwd: string, args: string[], expectedExit?: 
       shell: false,
       windowsHide: true,
       timeout: GIT_TIMEOUT_MS,
-      maxBuffer: GIT_MAX_OUTPUT_BYTES,
+      maxBuffer: mode === 'path-query' ? GIT_PATH_QUERY_BYTES : GIT_MAX_OUTPUT_BYTES,
       encoding: 'utf8',
     }, (error, stdout, stderr) => {
       const expectedFailure = error?.code === 1 && (
-        (expectedExit === 'diff-found' && stdout.length > 0)
-        || (expectedExit === 'head-missing' && stdout.length === 0 && stderr.length === 0)
+        (mode === 'diff-found' && stdout.length > 0)
+        || (mode === 'head-missing' && stdout.length === 0 && stderr.length === 0)
       );
       if (!error || expectedFailure) {
         fulfill(stdout);
@@ -280,6 +284,60 @@ function toRelativeGitPath(path: string): string {
 
 function literalPathspecs(paths: string[]): string[] {
   return paths.map((path) => `:(literal)${path}`);
+}
+
+async function checkIndexAndTreePaths(git: GitCommand, files: string[], head: string): Promise<void> {
+  const selected = new Set(files);
+  const parentsByDepth: Array<Set<string>> = [];
+  for (const file of selected) {
+    let depth = 0;
+    for (const parent of parentGitPaths(file)) {
+      (parentsByDepth[depth] ??= new Set<string>()).add(parent);
+      depth++;
+    }
+  }
+
+  // A literal index pathspec also matches its descendants, including entries
+  // hidden from porcelain by assume-unchanged or skip-worktree.
+  const indexed = await readGitPathRecords(git, ['ls-files', '--cached', '-z', '--', ...literalPathspecs(files)]);
+  if (indexed.some((path) => !selected.has(path))) {
+    throw new Error(FILE_DIRECTORY_CONFLICT);
+  }
+  if (head) {
+    await checkTreePathTypes(git, head, files, false);
+  }
+  for (const [depth, parents] of parentsByDepth.entries()) {
+    const paths = [...parents];
+    // Only a file at an ancestor itself conflicts. Exclude everything below
+    // this depth so a populated parent directory never lists its children.
+    const belowParents = `:(top,exclude,glob)${'*/'.repeat(depth + 1)}**`;
+    const indexedParents = await readGitPathRecords(git,
+      ['ls-files', '--cached', '-z', '--', ...literalPathspecs(paths), belowParents]);
+    if (indexedParents.length > 0) {
+      throw new Error(FILE_DIRECTORY_CONFLICT);
+    }
+    if (head) {
+      await checkTreePathTypes(git, head, paths, true);
+    }
+  }
+}
+
+async function checkTreePathTypes(git: GitCommand, head: string, paths: string[], directories: boolean): Promise<void> {
+  const entries = await readGitPathRecords(git, ['--literal-pathspecs', 'ls-tree', '-z', head, '--', ...paths]);
+  for (const entry of entries) {
+    const type = /^\d{6} (blob|tree|commit) [0-9a-f]+\t/.exec(entry)?.[1];
+    if (!type || (type === 'tree') !== directories) {
+      throw new Error(FILE_DIRECTORY_CONFLICT);
+    }
+  }
+}
+
+async function readGitPathRecords(git: GitCommand, args: string[]): Promise<string[]> {
+  const records = (await git(args, 'path-query')).split('\0');
+  if (records.pop() !== '' || records.includes('')) {
+    throw new Error('无法解析 Git 路径检查结果');
+  }
+  return records;
 }
 
 function hasFileDirectoryConflict(files: string[], candidatePaths: ReadonlySet<string>): boolean {
