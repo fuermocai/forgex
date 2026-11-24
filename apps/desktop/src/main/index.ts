@@ -1,9 +1,13 @@
 import { app, BrowserWindow, Menu } from 'electron';
+import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { registerShellIpcHandlers } from './ipc-handlers.js';
 import { DesktopRuntime } from './desktop-runtime.js';
 import { IPC_CHANNELS } from '../shared/desktop-api.js';
 import { RecentProjectStore } from './recent-project-store.js';
+
+import { SshHostStore } from './ssh-host-store.js';
+import { DesktopSshService } from './desktop-ssh-service.js';
 
 const isDevelopment = !app.isPackaged;
 
@@ -29,17 +33,24 @@ async function createWindow(): Promise<void> {
       sandbox: true,
     },
   });
-  const desktopRuntime = new DesktopRuntime((event) => {
-    if (!window.isDestroyed()) window.webContents.send(IPC_CHANNELS.event, event);
-  }, new RecentProjectStore(join(app.getPath('userData'), 'recent-projects.json')));
+  const userData = app.getPath('userData');
+  const desktopRuntime = new DesktopRuntime(
+    (event) => {
+      if (!window.isDestroyed()) window.webContents.send(IPC_CHANNELS.event, event);
+    },
+    new RecentProjectStore(join(userData, 'recent-projects.json')),
+    new SshHostStore(join(userData, 'ssh-hosts.json')),
+    new DesktopSshService(),
+  );
 
+  const rendererFile = join(import.meta.dirname, '../renderer/index.html');
   const allowedOrigin = isDevelopment ? process.env.ELECTRON_RENDERER_URL : undefined;
   window.webContents.setWindowOpenHandler(() => {
     return { action: 'deny' };
   });
   window.webContents.on('will-navigate', (event, url) => {
     if (allowedOrigin && new URL(url).origin === new URL(allowedOrigin).origin) return;
-    if (!allowedOrigin && url.startsWith('file://')) return;
+    if (!allowedOrigin && url.split(/[?#]/, 1)[0] === pathToFileURL(rendererFile).href) return;
     event.preventDefault();
   });
 
@@ -56,7 +67,7 @@ async function createWindow(): Promise<void> {
   });
 
   if (allowedOrigin) await window.loadURL(allowedOrigin);
-  else await window.loadFile(join(import.meta.dirname, '../renderer/index.html'));
+  else await window.loadFile(rendererFile);
 }
 
 app.whenReady().then(() => {

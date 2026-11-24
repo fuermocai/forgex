@@ -1,8 +1,16 @@
 import { app, dialog, ipcMain, shell, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
-import { basename } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { basename, join } from 'node:path';
 import { IPC_CHANNELS, type ProjectSelection } from '../shared/desktop-api.js';
 import { isGitCommitMessage, isGitPath, isGitPathList } from './desktop-git-service.js';
 import type { DesktopRuntime } from './desktop-runtime.js';
+
+import { parseRemoteDiagAction } from '../../../../packages/devops/src/ssh/ssh-guard.js';
+import { parseSshHostInput, sshFingerprint, sshId, sshRecord } from './ssh-host-store.js';
+
+function parseOperation(row: Record<string, unknown>) {
+  return { id: sshId(row.id), operationId: sshId(row.operationId) };
+}
 
 function assertTrustedSender(event: IpcMainInvokeEvent, owner: BrowserWindow): void {
   if (event.sender !== owner.webContents || event.senderFrame !== owner.webContents.mainFrame) {
@@ -10,10 +18,10 @@ function assertTrustedSender(event: IpcMainInvokeEvent, owner: BrowserWindow): v
   }
 
   const senderUrl = event.senderFrame.url;
-  const devUrl = process.env.ELECTRON_RENDERER_URL;
+  const devUrl = !app.isPackaged && process.env.ELECTRON_RENDERER_URL;
   if (devUrl) {
     if (new URL(senderUrl).origin !== new URL(devUrl).origin) throw new Error('拒绝来自非本地渲染器的 IPC 请求');
-  } else if (!senderUrl.startsWith('file://')) {
+  } else if (senderUrl.split(/[?#]/, 1)[0] !== pathToFileURL(join(import.meta.dirname, '../renderer/index.html')).href) {
     throw new Error('拒绝来自非打包界面的 IPC 请求');
   }
 }
@@ -152,6 +160,30 @@ export function registerShellIpcHandlers(owner: BrowserWindow, runtime: DesktopR
     return runtime.commitGit({ message: input.message });
   };
 
+  const sshHandlers = new Map<string, (input: unknown) => unknown>([
+    [IPC_CHANNELS.listSshHosts, () => runtime.listSshHosts()],
+    [IPC_CHANNELS.saveSshHost, (value) => runtime.saveSshHost(parseSshHostInput(value))],
+    [IPC_CHANNELS.deleteSshHost, (value) => runtime.deleteSshHost(sshId(value))],
+    [IPC_CHANNELS.probeSshHost, (value) => runtime.probeSshHost(parseOperation(sshRecord(value, ['id', 'operationId'])))],
+    [IPC_CHANNELS.testSshHost, (value) => runtime.testSshHost(parseOperation(sshRecord(value, ['id', 'operationId'])))],
+    [IPC_CHANNELS.trustSshHostKey, (value) => {
+      const row = sshRecord(value, ['id', 'fingerprint']);
+      return runtime.trustSshHostKey(sshId(row.id), sshFingerprint(row.fingerprint));
+    }],
+    [IPC_CHANNELS.runSshDiagnostic, (value) => {
+      const row = sshRecord(value, ['id', 'operationId', 'action']);
+      return runtime.runSshDiagnostic(parseOperation(row), parseRemoteDiagAction(row.action));
+    }],
+    [IPC_CHANNELS.cancelSshOperation, (value) => runtime.cancelSshOperation(sshId(value))],
+  ]);
+  for (const [channel, handle] of sshHandlers) {
+    ipcMain.handle(channel, (event, ...args: unknown[]) => {
+      assertTrustedSender(event, owner);
+      if (args.length !== (channel === IPC_CHANNELS.listSshHosts ? 0 : 1)) throw new Error('SSH 请求参数数量无效');
+      return handle(args[0]);
+    });
+  }
+
   ipcMain.handle(IPC_CHANNELS.appState, appState);
   ipcMain.handle(IPC_CHANNELS.recentProjects, recentProjects);
   ipcMain.handle(IPC_CHANNELS.selectProject, selectProject);
@@ -172,6 +204,7 @@ export function registerShellIpcHandlers(owner: BrowserWindow, runtime: DesktopR
   ipcMain.handle(IPC_CHANNELS.gitCommit, gitCommit);
 
   return () => {
+    for (const channel of sshHandlers.keys()) ipcMain.removeHandler(channel);
     for (const channel of [IPC_CHANNELS.appState, IPC_CHANNELS.recentProjects, IPC_CHANNELS.selectProject, IPC_CHANNELS.connectModel,
       IPC_CHANNELS.startSession, IPC_CHANNELS.sendMessage, IPC_CHANNELS.cancelTurn, IPC_CHANNELS.listSessions,
       IPC_CHANNELS.sessionMessages, IPC_CHANNELS.renameSession, IPC_CHANNELS.deleteSession,

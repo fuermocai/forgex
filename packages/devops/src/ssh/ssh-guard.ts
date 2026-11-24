@@ -107,6 +107,7 @@ const ALLOWED_LOG_DIRS = ['/var/log/', '/tmp/', '/home/'];
 
 function isAllowedPath(raw: string): boolean {
   const normalized = raw.replace(/\\/g, '/');
+  if (normalized.split('/').includes('..')) return false;
   if (!normalized.startsWith('/')) return false;
   for (const prefix of ALLOWED_LOG_DIRS) {
     if (normalized.startsWith(prefix)) return true;
@@ -145,6 +146,16 @@ export interface GuardedSpec {
   host: SshHostConfig;
   action: z.infer<typeof actionUnion>;
   command: SshCommand;
+}
+
+/** Parse the desktop IPC action without accepting caller-supplied command fields. */
+export function parseRemoteDiagAction(raw: unknown) {
+  const parsed = actionUnion.safeParse(raw);
+  if (!parsed.success || !raw || typeof raw !== 'object'
+    || Object.keys(raw).some((key) => !Object.hasOwn(parsed.data, key))) {
+    throw new ForgeError('SSH_ACTION_INVALID', '诊断动作或参数无效');
+  }
+  return parsed.data;
 }
 
 export class SshGuard {

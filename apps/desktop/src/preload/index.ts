@@ -4,6 +4,14 @@ import { ipcRenderer } from 'electron';
 import { IPC_CHANNELS, type DesktopApi, type DesktopEvent } from '../shared/desktop-api.js';
 
 const api: DesktopApi = {
+  listSshHosts: () => ipcRenderer.invoke(IPC_CHANNELS.listSshHosts),
+  saveSshHost: (input) => ipcRenderer.invoke(IPC_CHANNELS.saveSshHost, input),
+  deleteSshHost: (input) => ipcRenderer.invoke(IPC_CHANNELS.deleteSshHost, input),
+  probeSshHost: (input) => ipcRenderer.invoke(IPC_CHANNELS.probeSshHost, input),
+  trustSshHostKey: (input) => ipcRenderer.invoke(IPC_CHANNELS.trustSshHostKey, input),
+  testSshHost: (input) => ipcRenderer.invoke(IPC_CHANNELS.testSshHost, input),
+  runSshDiagnostic: (input) => ipcRenderer.invoke(IPC_CHANNELS.runSshDiagnostic, input),
+  cancelSshOperation: (input) => ipcRenderer.invoke(IPC_CHANNELS.cancelSshOperation, input),
   getAppState: () => ipcRenderer.invoke(IPC_CHANNELS.appState),
   getRecentProjects: () => ipcRenderer.invoke(IPC_CHANNELS.recentProjects),
   selectProject: () => ipcRenderer.invoke(IPC_CHANNELS.selectProject),
@@ -30,4 +38,3 @@ const api: DesktopApi = {
 };
 
 contextBridge.exposeInMainWorld('forgex', api);
-

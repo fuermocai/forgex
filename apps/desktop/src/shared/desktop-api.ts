@@ -1,3 +1,5 @@
+import type { RemoteDiagAction } from '../../../../packages/devops/src/ssh/types.js';
+
 export const IPC_CHANNELS = {
   appState: 'forgex:app-state',
   recentProjects: 'forgex:recent-projects',
@@ -17,6 +19,14 @@ export const IPC_CHANNELS = {
   gitStage: 'forgex:git-stage',
   gitUnstage: 'forgex:git-unstage',
   gitCommit: 'forgex:git-commit',
+  listSshHosts: 'forgex:list-ssh-hosts',
+  saveSshHost: 'forgex:save-ssh-host',
+  deleteSshHost: 'forgex:delete-ssh-host',
+  probeSshHost: 'forgex:probe-ssh-host',
+  trustSshHostKey: 'forgex:trust-ssh-host-key',
+  testSshHost: 'forgex:test-ssh-host',
+  runSshDiagnostic: 'forgex:run-ssh-diagnostic',
+  cancelSshOperation: 'forgex:cancel-ssh-operation',
   event: 'forgex:event',
 } as const;
 
@@ -107,7 +117,45 @@ export type DesktopEvent =
   | { type: 'approval:resolved'; id: string }
   | { type: 'approval:request'; request: DesktopApprovalRequest };
 
+export interface SshHostProfileInput {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  privateKeyPath: string;
+}
+
+export interface SshHostProfile extends SshHostProfileInput {
+  id: string;
+  hostKeyFingerprint: string | null;
+}
+
+export interface SshHostOperation {
+  id: string;
+  operationId: string;
+}
+
+export type RemoteDiagActionDto = RemoteDiagAction;
+
+export interface SshDiagnosticResult {
+  action: RemoteDiagActionDto['action'];
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  truncated: boolean;
+  timedOut: boolean;
+  durationMs: number;
+}
+
 export interface DesktopApi {
+  listSshHosts(): Promise<SshHostProfile[]>;
+  saveSshHost(input: SshHostProfileInput & { id?: string }): Promise<SshHostProfile>;
+  deleteSshHost(id: string): Promise<void>;
+  probeSshHost(input: SshHostOperation): Promise<{ fingerprint: string }>;
+  trustSshHostKey(input: { id: string; fingerprint: string }): Promise<SshHostProfile>;
+  testSshHost(input: SshHostOperation): Promise<{ ok: true }>;
+  runSshDiagnostic(input: SshHostOperation & { action: RemoteDiagActionDto }): Promise<SshDiagnosticResult>;
+  cancelSshOperation(operationId: string): Promise<void>;
   getAppState(): Promise<DesktopAppState>;
   getRecentProjects(): Promise<ProjectSelection[]>;
   selectProject(): Promise<ProjectSelection | null>;
