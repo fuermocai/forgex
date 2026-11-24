@@ -47,6 +47,13 @@ export interface RoutedExecution<T> {
   fallbackReason?: string;
 }
 
+export class ModelStreamInterruptedError extends Error {
+  constructor(modelId: string, options?: ErrorOptions) {
+    super(`Model ${modelId} failed after streaming output; fallback stopped to avoid mixing partial responses.`, options);
+    this.name = 'ModelStreamInterruptedError';
+  }
+}
+
 export class ModelRouter {
   private readonly models = new Map<string, ModelDescriptor>();
   private readonly health = new Map<string, { lastFailAt: number; consecutiveFails: number }>();
@@ -154,6 +161,7 @@ export class ModelRouter {
         };
       } catch (err) {
         if (isAbortError(err)) throw err;
+        if (err instanceof ModelStreamInterruptedError) throw err;
         this.markFailed(c.id);
         errors.push(redactText(`${c.id}: ${err instanceof Error ? err.message : String(err)}`));
       }

@@ -1,5 +1,5 @@
 import { estimateMessagesTokens } from '@forgex/shared';
-import { ModelRouter } from './model-router.js';
+import { ModelRouter, ModelStreamInterruptedError } from './model-router.js';
 import type { ModelCapability, ModelConfig, ModelProvider, ModelRole, ChatRequest, ChatResponse, StreamHandlers } from './types.js';
 
 const ROLE_CAPABILITIES: Record<ModelRole, ModelCapability[]> = {
@@ -61,10 +61,24 @@ export class RoutedModelProvider implements ModelProvider {
         minimumContextWindow,
         prefer,
       },
-      async (provider) => provider.chat({
-        ...request,
-        maxOutputTokens: Math.min(outputTokens || provider.config.maxOutputTokens, provider.config.maxOutputTokens),
-      }, handlers),
+      async (provider) => {
+        let emitted = false;
+        try {
+          return await provider.chat({
+            ...request,
+            maxOutputTokens: Math.min(outputTokens || provider.config.maxOutputTokens, provider.config.maxOutputTokens),
+          }, handlers && {
+            onDelta: (text) => {
+              emitted = true;
+              handlers.onDelta?.(text);
+            },
+            onFirstToken: () => handlers.onFirstToken?.(),
+          });
+        } catch (error) {
+          if (!emitted) throw error;
+          throw new ModelStreamInterruptedError(provider.config.model, { cause: error });
+        }
+      },
     );
 
     const fallbackReason = routed.fallbackReason

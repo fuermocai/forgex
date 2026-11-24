@@ -1,7 +1,7 @@
 /** JSONL persistence for project memory entries. */
 import { createHash } from 'node:crypto';
 import { ForgeError, JsonlEventStore } from '@forgex/shared';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import type { MemoryCandidate, MemoryCandidateStatus, MemoryEntry, MemoryScope } from './types.js';
 
 /** Optional filters for memory lookup. */
@@ -18,10 +18,14 @@ export interface MemoryQuery {
 
 export class MemoryStore {
   private readonly events: JsonlEventStore;
+  private readonly path: string;
+  private entryCache: { version: string; entries: MemoryEntry[] } | null = null;
+  private candidateCache: { version: string; candidates: MemoryCandidate[] } | null = null;
 
   constructor(path: string) {
+    this.path = path;
     recoverFinalCorruptRecord(path);
-    this.events = new JsonlEventStore(path);
+    this.events = new JsonlEventStore(path, { createIfMissing: false });
   }
 
   /** Appends a memory entry after validation by the caller. */
@@ -33,6 +37,7 @@ export class MemoryStore {
     }
     const parent = this.events.readAll().findLast((event) => event.data.entryId === entry.id);
     this.events.append('memory.entry.saved', { entryId: entry.id, entry }, parent?.id ?? null);
+    this.invalidateCache();
   }
 
   /** Returns a memory entry by ID, including superseded entries. */
@@ -67,6 +72,7 @@ export class MemoryStore {
     const updatedAt = new Date().toISOString();
     const parent = this.events.readAll().findLast((event) => event.data.entryId === oldId);
     this.events.append('memory.entry.superseded', { entryId: oldId, supersededBy: newEntryId, updatedAt }, parent?.id ?? null);
+    this.invalidateCache();
     return true;
   }
 
@@ -80,6 +86,7 @@ export class MemoryStore {
       throw new ForgeError('MEMORY_STORE_ERROR', `记忆候选 ID 已存在: ${candidate.id}`);
     }
     this.events.append('memory.candidate.proposed', { candidate });
+    this.invalidateCache();
   }
 
   getCandidate(id: string): MemoryCandidate | null {
@@ -103,12 +110,19 @@ export class MemoryStore {
       updatedAt: new Date().toISOString(),
       ...(memoryId ? { memoryId } : {}),
     });
+    this.invalidateCache();
     return true;
   }
 
   close(): void { /* JSONL appends are synchronous and require no flush. */ }
 
   private readEntries(includeSuperseded: boolean): MemoryEntry[] {
+    const version = this.version();
+    if (this.entryCache?.version === version) {
+      const entries = this.entryCache.entries;
+      return (includeSuperseded ? entries : entries.filter((entry) => entry.superseded_by === undefined))
+        .map((entry) => JSON.parse(JSON.stringify(entry)) as MemoryEntry);
+    }
     const records = new Map<string, MemoryEntry>();
     for (const event of this.events.readAll()) {
       if (event.type === 'memory.entry.saved' && typeof event.data.entryId === 'string') {
@@ -126,10 +140,16 @@ export class MemoryStore {
       }
     }
     const entries = [...records.values()];
-    return includeSuperseded ? entries : entries.filter((entry) => entry.superseded_by === undefined);
+    this.entryCache = { version, entries };
+    return (includeSuperseded ? entries : entries.filter((entry) => entry.superseded_by === undefined))
+      .map((entry) => JSON.parse(JSON.stringify(entry)) as MemoryEntry);
   }
 
   private readCandidates(): MemoryCandidate[] {
+    const version = this.version();
+    if (this.candidateCache?.version === version) {
+      return this.candidateCache.candidates.map((candidate) => JSON.parse(JSON.stringify(candidate)) as MemoryCandidate);
+    }
     const records = new Map<string, MemoryCandidate>();
     for (const event of this.events.readAll()) {
       if (event.type === 'memory.candidate.proposed') {
@@ -148,7 +168,21 @@ export class MemoryStore {
         }
       }
     }
-    return [...records.values()];
+    const candidates = [...records.values()];
+    this.candidateCache = { version, candidates };
+    return candidates.map((candidate) => JSON.parse(JSON.stringify(candidate)) as MemoryCandidate);
+  }
+
+  private version(): string {
+    if (this.path === ':memory:') return `memory:${this.entryCache?.version ?? this.candidateCache?.version ?? 'initial'}`;
+    if (!existsSync(this.path)) return 'missing';
+    const stat = statSync(this.path);
+    return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  }
+
+  private invalidateCache(): void {
+    this.entryCache = null;
+    this.candidateCache = null;
   }
 }
 

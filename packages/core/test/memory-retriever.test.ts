@@ -155,9 +155,14 @@ describe('MemoryRetriever.recall', () => {
   it('scopes 限定生效', () => {
     insert(store, { key: 'p', content: 'project note' });
     insert(store, { key: 's', content: 'session note', scope: 'session', session_id: 's1' });
-    const hits = retriever.recall({ workspace: WS, scopes: ['session'] });
+    const hits = retriever.recall({ workspace: WS, scopes: ['session'], session_id: 's1' });
     expect(hits).toHaveLength(1);
     expect(hits[0]!.entry.key).toBe('s');
+  });
+
+  it('omits session memories when the caller does not provide a session ID', () => {
+    insert(store, { key: 's', content: 'session note', scope: 'session', session_id: 's1' });
+    expect(retriever.recall({ workspace: WS, scopes: ['session'] })).toEqual([]);
   });
 
   it('session 级记忆按 session_id 过滤，project 级不受 session_id 影响', () => {

@@ -26,7 +26,7 @@ import type { MemoryStore } from './store.js';
 /** 召回请求 */
 export interface RecallQuery {
   workspace: string;
-  /** 召回哪些 scope（缺省全部三层都召回） */
+  /** 召回哪些 scope（缺省只召回 project；会话/任务记忆需显式 ID） */
   scopes?: readonly MemoryScope[];
   session_id?: string;
   task_id?: string;
@@ -68,12 +68,15 @@ export class MemoryRetriever {
 
   /** 召回记忆（按 rankScore 降序） */
   recall(query: RecallQuery, now: Date = new Date()): RecallHit[] {
-    const scopes = query.scopes ?? ['project', 'session', 'task'];
+    const scopes = query.scopes ?? ['project'];
     const limit = Math.min(Math.max(1, query.limit ?? DEFAULT_RECALL_LIMIT), MAX_RECALL_LIMIT);
 
     // 1. 分层取候选（scope 内可再叠加 session/task 过滤，收紧候选集）
     const candidates: MemoryEntry[] = [];
     for (const scope of scopes) {
+      // Session and task memories must never leak across conversations when callers omit IDs.
+      if (scope === 'session' && !query.session_id) continue;
+      if (scope === 'task' && !query.task_id) continue;
       const rows = this.store.query({
         workspace: query.workspace,
         scope,
@@ -83,8 +86,8 @@ export class MemoryRetriever {
           : {}),
         ...(query.task_id !== undefined && scope === 'task' ? { task_id: query.task_id } : {}),
         ...(query.kind !== undefined ? { kind: query.kind } : {}),
-        // 多取一些供排序后截断；上限 4 倍 limit
-        limit: limit * 4,
+        // Rank the complete scoped candidate set before applying the result limit.
+        limit: Number.MAX_SAFE_INTEGER,
       });
       candidates.push(...rows);
     }
@@ -109,6 +112,9 @@ export class MemoryRetriever {
     const filtered = terms.length > 0 ? hits.filter((h) => h.relevance > 0) : hits;
 
     filtered.sort((a, b) => {
+      const scopeRank = (scope: MemoryScope) => scope === 'task' ? 0 : scope === 'session' ? 1 : 2;
+      const byScope = scopeRank(a.entry.scope) - scopeRank(b.entry.scope);
+      if (byScope !== 0) return byScope;
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       // 同分时新的在前，保证稳定可预期
       return b.entry.updated_at.localeCompare(a.entry.updated_at);

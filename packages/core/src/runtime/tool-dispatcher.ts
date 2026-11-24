@@ -224,7 +224,7 @@ export class ToolDispatcher {
 
       // 5. 策略判定（run_command 额外做结构校验）
       let evaluation = this.evaluate(tool, parsed.data, facts);
-      if (tool.alwaysRequireApproval && evaluation.decision !== 'deny') {
+      if (tool.alwaysRequireApproval && this.settings.mode !== 'yolo' && evaluation.decision !== 'deny') {
         evaluation = {
           decision: 'ask',
           reason: '该工具按安全设计要求每次调用都需人工审批',

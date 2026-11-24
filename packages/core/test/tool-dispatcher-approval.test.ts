@@ -19,8 +19,8 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function makeDispatcher(approved: boolean, calls: number[], previews: string[]) {
-  const settings = createDefaultPolicySettings({ workspaceRoots: [root], mode: 'yolo' });
+function makeDispatcher(approved: boolean, calls: number[], previews: string[], mode: 'standard' | 'yolo' = 'standard') {
+  const settings = createDefaultPolicySettings({ workspaceRoots: [root], mode });
   const workspace = new WorkspaceGuard({ roots: [root], writableRoots: [root] });
   const tool: ToolDefinition<Record<string, never>> = {
     name: 'forced_approval',
@@ -43,7 +43,7 @@ function makeDispatcher(approved: boolean, calls: number[], previews: string[]) 
 }
 
 function makeCompletePreviewDispatcher(options: { preview: string; maxChars: number; approved: boolean; calls: number[]; previews: string[]; requests: Array<{ mustReview?: boolean }> }) {
-  const settings = createDefaultPolicySettings({ workspaceRoots: [root], mode: 'yolo' });
+  const settings = createDefaultPolicySettings({ workspaceRoots: [root], mode: 'standard' });
   const workspace = new WorkspaceGuard({ roots: [root], writableRoots: [root] });
   const tool: ToolDefinition<Record<string, never>> = {
     name: 'complete_preview',
@@ -74,7 +74,7 @@ function makeCompletePreviewDispatcher(options: { preview: string; maxChars: num
 const call = { id: 'call-1', type: 'function' as const, function: { name: 'forced_approval', arguments: '{}' } };
 
 describe('ToolDispatcher mandatory approval', () => {
-  it('still requests approval in yolo mode when the tool requires it', async () => {
+  it('requests approval in standard mode when the tool requires it', async () => {
     const calls: number[] = [];
     const previews: string[] = [];
     const dispatcher = makeDispatcher(true, calls, previews);
@@ -82,6 +82,17 @@ describe('ToolDispatcher mandatory approval', () => {
     expect(result.ok).toBe(true);
     expect(calls).toHaveLength(1);
     expect(previews).toEqual(['trusted approval preview']);
+  });
+
+  it('yolo mode bypasses even tool-level approval requirements', async () => {
+    const calls: number[] = [];
+    const previews: string[] = [];
+    const dispatcher = makeDispatcher(false, calls, previews, 'yolo');
+    const result = await dispatcher.execute(call, { sessionId: 'session-a', signal: new AbortController().signal });
+
+    expect(result.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(previews).toEqual([]);
   });
 
   it('does not execute a mandatory-approval tool after rejection', async () => {

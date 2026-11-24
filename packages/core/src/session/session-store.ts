@@ -56,6 +56,8 @@ export class SessionStore implements AuditSink {
       else if (event.type === 'session.updated' && event.data.id === id && session) {
         const patch = isRecord(event.data.patch) ? event.data.patch : {};
         session = Object.assign({}, session, patch, { updatedAt: event.ts }) as SessionRecord;
+      } else if (event.type === 'session.deleted' && event.data.id === id) {
+        session = null;
       }
     }
     return session;
@@ -71,6 +73,15 @@ export class SessionStore implements AuditSink {
     if (!this.getSession(id)) return;
     const parent = this.latestEvents().findLast((event) => event.data.id === id && (event.type === 'session.created' || event.type === 'session.updated'));
     this.push('session.updated', { id, patch }, parent?.id ?? null);
+  }
+
+  deleteSession(id: string): boolean {
+    const session = this.getSession(id);
+    if (!session) return false;
+    const parent = this.latestEvents().findLast((event) => event.data.id === id
+      && (event.type === 'session.created' || event.type === 'session.updated'));
+    this.push('session.deleted', { id, workspace: session.workspace }, parent?.id ?? null);
+    return true;
   }
 
   appendMessage(sessionId: string, message: ChatMessage): void {

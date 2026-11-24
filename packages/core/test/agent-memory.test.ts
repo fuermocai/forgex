@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,6 +86,20 @@ function createAgent(options: {
 }
 
 describe('Agent project memory', () => {
+  it('auto recall leaves a missing memory file untouched', async () => {
+    const memoryPath = join(workspace, 'memory.jsonl');
+    const persistent = createMemoryManager(memoryPath);
+    const model = provider([response('done')]);
+    const agent = createAgent({ model, memoryManager: persistent });
+
+    try {
+      await agent.run('Check the project build setup.');
+      expect(existsSync(memoryPath)).toBe(false);
+    } finally {
+      persistent.close();
+    }
+  });
+
   it('injects relevant project memory with source labels', async () => {
     memory.rememberUserFact({
       scope: 'project', key: 'build.command', content: 'Run pnpm test before delivery', workspace,
