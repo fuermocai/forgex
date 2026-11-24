@@ -187,7 +187,7 @@ export async function doctorCommand(args: ParsedArgs, options: { cwd: string }):
       name: 'OS 沙箱',
       status: sandboxReport.osSandbox.available ? 'ok' : 'warn',
       detail: sandboxReport.osSandbox.available
-        ? `${sandboxReport.osSandbox.details?.mechanism ?? 'bubblewrap'}（探针已验证）· ${sandboxReport.osSandbox.details?.bwrap_path ?? ''}`
+        ? `${sandboxReport.osSandbox.details?.mechanism ?? 'platform-native'}（探针已验证）· ${sandboxReport.osSandbox.details?.bwrap_path ?? ''}`
         : sandboxReport.osSandbox.reason,
     });
     checks.push({

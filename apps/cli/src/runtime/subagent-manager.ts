@@ -4,6 +4,7 @@ import { Agent, SessionStore, type ForgeExtension } from '@forgex/core';
 import type { AgentEvent, ChatMessage, Logger, PolicySettings, ToolContext, WorkerUsage } from '@forgex/shared';
 import { uuid } from '@forgex/shared';
 import type { ModelProvider } from '@forgex/models';
+import type { RunCommandToolOptions } from '@forgex/tools';
 import {
   ApprovalManager,
   AuditLogger,
@@ -40,6 +41,7 @@ export interface SubagentManagerOptions {
   logger: Logger;
   onEvent?: (event: AgentEvent) => void;
   extensions?: ReadonlyArray<ForgeExtension>;
+  createIsolatedExecutor?: (workspaceRoot: string, protectedPaths?: PolicySettings['protectedPaths']) => RunCommandToolOptions['executeIsolated'];
 }
 
 export type WorkerStatus = 'queued' | 'starting' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
@@ -312,6 +314,7 @@ export class SubagentManager {
       const registry = new ToolRegistry(createBuiltinTools({
         remoteHosts: settings.remoteHosts,
         languageServers: this.options.config.tools.languageServers,
+        ...(this.options.createIsolatedExecutor ? { runCommand: { executeIsolated: this.options.createIsolatedExecutor(worktree.path, settings.protectedPaths) } } : {}),
       }));
       const agent = new Agent({
         provider: this.options.getProvider(),

@@ -18,7 +18,7 @@ forgex --version
 ## 快速开始
 
 ```bash
-# 方式一：直接启动。首次运行会自动进入连接向导（provider → baseUrl → API Key → model）
+# 方式一：直接启动。即使尚未配置模型，也会先进入 TUI；在会话中用 /connect 或 /key 配置
 forgex
 
 # 方式二：先单独配置，会做一次连通性测试

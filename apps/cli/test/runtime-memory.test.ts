@@ -32,7 +32,7 @@ describe('runtime project memory', () => {
     }
   });
 
-  it('creates the memory store only when explicitly enabled', async () => {
+  it('does not create an empty memory file before the first explicit write', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'forgex-memory-enabled-'));
     directories.push(dir);
     const memoryPath = join(dir, 'project-memory.jsonl');
@@ -43,6 +43,11 @@ describe('runtime project memory', () => {
     const runtime = createRuntime({ cwd: dir, loaded, logger: silent });
     try {
       expect(runtime.memory).toBeDefined();
+      expect(existsSync(memoryPath)).toBe(false);
+      runtime.memory!.rememberUserFact({
+        scope: 'project', key: 'test.fact', content: 'persist after explicit write',
+        workspace: dir, evidence_refs: ['user:test'],
+      });
       expect(existsSync(memoryPath)).toBe(true);
     } finally {
       await runtime.close();

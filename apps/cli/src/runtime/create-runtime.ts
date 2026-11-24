@@ -18,6 +18,7 @@ import {
 } from '@forgex/security';
 import { BrowserSessionManager, CodeExecutionSessionManager, DapSessionManager, ToolRegistry, createBuiltinTools } from '@forgex/tools';
 import { Advisor, Agent, MemoryManager, SessionStore, type AdvisorStage, type ForgeExtension } from '@forgex/core';
+import { createIsolatedCommandExecutor } from './isolated-command.js';
 import type { LoadedConfig, ResolvedConfig } from '../config/load-config.js';
 import { SubagentManager } from './subagent-manager.js';
 
@@ -63,6 +64,7 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
     workspaceRoots: config.security.workspaceRoots,
     writableRoots: config.security.writableRoots,
     mode: config.security.mode,
+    toolPolicies: config.security.toolPolicies,
     allowedPrograms: config.security.allowedPrograms,
     requireApprovalForWrite: config.security.requireApprovalForWrite,
     requireApprovalForExecute: config.security.requireApprovalForExecute,
@@ -77,6 +79,8 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
     writableRoots: settings.writableRoots,
     protectedPaths: settings.protectedPaths,
   });
+  const workspaceCwd = settings.workspaceRoots[0] ?? cwd;
+  const executeIsolated = createIsolatedCommandExecutor(workspaceCwd, settings.protectedPaths);
 
   // 主 JSONL 事件流同时保存会话与审计事件。
   const store = new SessionStore(config.session.dbPath);
@@ -158,6 +162,7 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
     logger,
     onEvent: (event) => agent.events.emit(event),
     ...(options.extensions ? { extensions: options.extensions } : {}),
+    createIsolatedExecutor: createIsolatedCommandExecutor,
   });
   // v0.2.0：根据 PolicySettings.remoteHosts 条件注册 ssh_inspect
   const registry = new ToolRegistry(createBuiltinTools({
@@ -168,12 +173,11 @@ export function createRuntime(options: CreateRuntimeOptions): ForgeRuntime {
     ...(browserConfig && browserSessions ? { browserAutomation: browserConfig, browserSessionManager: browserSessions } : {}),
     delegateTask: subagents.execute,
     ...(memory ? { memoryTools: memory } : {}),
+    runCommand: { executeIsolated },
   }));
 
   // 工具的默认 cwd 必须是授权工作区根目录，而不是进程 cwd：
   // 否则用户在仓库外部启动 CLI 时，所有相对路径都会被判定为越界。
-  const workspaceCwd = settings.workspaceRoots[0] ?? cwd;
-
   agent = new Agent({
     provider: routedProvider,
     registry,

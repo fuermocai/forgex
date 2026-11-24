@@ -5,7 +5,7 @@ export function modelSetupHint(options: { interactive: boolean }): string {
   const lines = [
     '尚未配置模型。',
     options.interactive
-      ? '在交互式终端里直接运行 `forgex` 会自动进入连接向导。'
+      ? '进入 TUI 后使用 `/connect` 或 `/key` 配置模型。'
       : '任选一种方式完成配置：',
     '  1. 交互式向导：forgex connect',
     '  2. 非交互式：forgex connect --provider deepseek --api-key sk-xxx --model deepseek-flash',

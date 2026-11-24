@@ -12,6 +12,7 @@
  * 具体实现见 runtime/connect-core.ts（TUI `/connect` 复用同一套逻辑）。
  */
 import { createInterface } from 'node:readline/promises';
+import { emitKeypressEvents, type Key } from 'node:readline';
 import { resolve } from 'node:path';
 import { stderr, stdin, stdout } from 'node:process';
 import { flagString, type ParsedArgs } from '../args.js';
@@ -50,57 +51,116 @@ export async function connectCommand(args: ParsedArgs, _options: { cwd: string }
   // ---------- 交互式向导 ----------
   stdout.write('ForgeX Connect — 连接你的模型提供方\n\n');
 
-  const rl = createInterface({ input: stdin, output: stderr });
-
   try {
     // 1. 选 provider
-    stdout.write('选择模型提供方（输入编号或名称）：\n');
-    PROVIDERS_KEYS.forEach((key, i) => {
-      const p = PROVIDERS[key]!;
-      stdout.write(`  ${i + 1}. ${p.name} (${p.defaultBaseUrl})\n`);
-    });
-    stdout.write('\n> ');
-    const providerInput = (await rl.question('')).trim();
+    const providerInput = await selectProvider();
+    if (providerInput === undefined) {
+      stderr.write('\n[connect] 已取消\n');
+      return 130;
+    }
     const provider = resolveProvider(providerInput);
     const preset = PROVIDERS[provider];
 
-    // 2. baseUrl
-    const baseUrlDefault = preset?.defaultBaseUrl ?? existing.model.baseUrl;
-    stdout.write(`baseUrl [${baseUrlDefault}]: `);
-    const baseUrl = (await rl.question('')).trim() || baseUrlDefault;
+    const rl = createInterface({ input: stdin, output: stderr });
 
-    // 3. API Key（不回显——readline.question 本身无法隐藏，这里只提示用户避免粘贴到日志）
-    stdout.write('\nAPI Key（输入不会被隐藏，粘贴后按回车）: ');
-    const apiKey = (await rl.question('')).trim();
-    if (!apiKey) {
-      stderr.write('[connect] API Key 不能为空\n');
-      return 2;
+    try {
+      // 2. baseUrl
+      const baseUrlDefault = preset?.defaultBaseUrl ?? existing.model.baseUrl;
+      stdout.write(`baseUrl [${baseUrlDefault}]: `);
+      const baseUrl = (await rl.question('')).trim() || baseUrlDefault;
+
+      // 3. API Key（不回显——readline.question 本身无法隐藏，这里只提示用户避免粘贴到日志）
+      stdout.write('\nAPI Key（输入不会被隐藏，粘贴后按回车）: ');
+      const apiKey = (await rl.question('')).trim();
+      if (!apiKey) {
+        stderr.write('[connect] API Key 不能为空\n');
+        return 2;
+      }
+
+      // 4. model
+      const modelDefault = preset?.defaultModel ?? existing.model.model;
+      stdout.write(`\n模型名 [${modelDefault}]: `);
+      const model = (await rl.question('')).trim() || modelDefault;
+
+      // 5. 保存位置
+      const saveDefault = configPath;
+      stdout.write(`\n保存配置到 [${saveDefault}]：`);
+      const saveInput = (await rl.question('')).trim();
+      const finalConfigPath = saveInput ? resolve(saveInput) : saveDefault;
+
+      stdout.write('\n--------------------------------------------\n');
+      stdout.write(`Provider   : ${provider}\n`);
+      stdout.write(`Base URL   : ${baseUrl}\n`);
+      stdout.write(`Model      : ${model}\n`);
+      stdout.write(`API Key    : ${maskKey(apiKey)}\n`);
+      stdout.write(`Config     : ${finalConfigPath}\n`);
+      stdout.write('--------------------------------------------\n');
+      stdout.write('连通性测试中（5s 超时）...\n');
+
+      return await doConnect({ provider, apiKey, baseUrl, model, configPath: finalConfigPath, existing });
+    } finally {
+      rl.close();
     }
-
-    // 4. model
-    const modelDefault = preset?.defaultModel ?? existing.model.model;
-    stdout.write(`\n模型名 [${modelDefault}]: `);
-    const model = (await rl.question('')).trim() || modelDefault;
-
-    // 5. 保存位置
-    const saveDefault = configPath;
-    stdout.write(`\n保存配置到 [${saveDefault}]：`);
-    const saveInput = (await rl.question('')).trim();
-    const finalConfigPath = saveInput ? resolve(saveInput) : saveDefault;
-
-    stdout.write('\n--------------------------------------------\n');
-    stdout.write(`Provider   : ${provider}\n`);
-    stdout.write(`Base URL   : ${baseUrl}\n`);
-    stdout.write(`Model      : ${model}\n`);
-    stdout.write(`API Key    : ${maskKey(apiKey)}\n`);
-    stdout.write(`Config     : ${finalConfigPath}\n`);
-    stdout.write('--------------------------------------------\n');
-    stdout.write('连通性测试中（5s 超时）...\n');
-
-    return await doConnect({ provider, apiKey, baseUrl, model, configPath: finalConfigPath, existing });
   } finally {
-    rl.close();
+    if (stdin.isTTY && stdin.isRaw) stdin.setRawMode(false);
   }
+}
+
+/** Shows an arrow-key provider picker in interactive terminals. */
+async function selectProvider(): Promise<string | undefined> {
+  stdout.write('选择模型提供方（↑/↓ 移动，Enter 确认，Esc 取消）：\n');
+  if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
+    const rl = createInterface({ input: stdin, output: stderr });
+    try {
+      PROVIDERS_KEYS.forEach((key, index) => {
+        const preset = PROVIDERS[key]!;
+        stdout.write(`  ${index + 1}. ${preset.name}\n`);
+      });
+      return resolveProvider((await rl.question('输入编号或名称（默认 DeepSeek）：')).trim());
+    } finally {
+      rl.close();
+    }
+  }
+
+  let selectedIndex = 0;
+  const drawOptions = () => {
+    PROVIDERS_KEYS.forEach((key, index) => {
+      const preset = PROVIDERS[key]!;
+      const marker = index === selectedIndex ? '❯' : ' ';
+      stdout.write(`\x1B[2K\r${marker} ${preset.name}\n`);
+    });
+  };
+
+  emitKeypressEvents(stdin);
+  stdin.setRawMode(true);
+  stdin.resume();
+  drawOptions();
+
+  return await new Promise((resolveSelection) => {
+    const onKeypress = (_input: string, key: Key) => {
+      if (key.name === 'up' || key.name === 'down') {
+        selectedIndex = (selectedIndex + (key.name === 'down' ? 1 : -1) + PROVIDERS_KEYS.length) % PROVIDERS_KEYS.length;
+        stdout.write(`\x1B[${PROVIDERS_KEYS.length}A`);
+        drawOptions();
+        return;
+      }
+      if (key.name === 'return') {
+        cleanup();
+        resolveSelection(PROVIDERS_KEYS[selectedIndex]);
+        return;
+      }
+      if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        cleanup();
+        resolveSelection(undefined);
+      }
+    };
+    const cleanup = () => {
+      stdin.off('keypress', onKeypress);
+      if (stdin.isRaw) stdin.setRawMode(false);
+      stdout.write('\n');
+    };
+    stdin.on('keypress', onKeypress);
+  });
 }
 
 /* ========================================================================== */

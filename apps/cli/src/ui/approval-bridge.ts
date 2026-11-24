@@ -40,7 +40,7 @@ export class ApprovalBridge {
     };
   }
 
-  /** UI 在用户按下 y/n 后调用 */
+  /** Resolves the visible approval choice selected by the user. */
   respond(approved: boolean): void {
     if (this.active) {
       const active = this.active;
@@ -50,6 +50,22 @@ export class ApprovalBridge {
       return;
     }
     this.queued = approved;
+  }
+
+  /** Removes an approval whose manager-side timeout or cancellation has settled. */
+  dismiss(requestId: string): void {
+    if (this.active?.request.id === requestId) {
+      const active = this.active;
+      this.active = null;
+      active.resolve(false);
+      this.showNext();
+      return;
+    }
+
+    const pendingIndex = this.pending.findIndex((item) => item.request.id === requestId);
+    if (pendingIndex < 0) return;
+    const [pending] = this.pending.splice(pendingIndex, 1);
+    pending?.resolve(false);
   }
 
   /** 会话取消时按拒绝处理，避免 Agent 永久挂起 */

@@ -77,6 +77,7 @@ const RemoteHostSchema = z.object({
 
 const SecuritySchema = z.object({
   mode: z.enum(['readonly', 'standard', 'trusted', 'yolo']).default('standard'),
+  toolPolicies: z.record(z.enum(['allow', 'ask', 'deny'])).default({}),
   workspaceRoots: z.array(z.string().min(1)).min(1).default(['.']),
   writableRoots: z.array(z.string().min(1)).optional(),
   requireApprovalForWrite: z.boolean().default(true),
@@ -218,6 +219,7 @@ export interface ResolvedConfig {
   modelRoles: Partial<Record<ModelRole, string>>;
   security: {
     mode: 'readonly' | 'standard' | 'trusted' | 'yolo';
+    toolPolicies: Record<string, 'allow' | 'ask' | 'deny'>;
     workspaceRoots: string[];
     writableRoots: string[];
     requireApprovalForWrite: boolean;
@@ -479,6 +481,7 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
       modelRoles,
       security: {
         mode: value.security.mode,
+        toolPolicies: value.security.toolPolicies,
         workspaceRoots,
         writableRoots,
         requireApprovalForWrite: value.security.requireApprovalForWrite,

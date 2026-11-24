@@ -55,8 +55,8 @@ export function applyInputKey(state: EditState, char: string, key: EditKeyState)
 
   if (!char) return null;
 
-  // 粘贴多行文本时压平为单行，避免破坏 TUI 布局。
-  const clean = char.replace(/[\r\n]+/g, ' ');
+  // Normalize terminal-specific line endings while preserving pasted paragraphs.
+  const clean = char.replace(/\r\n?/g, '\n');
   if (!clean) return { text: state.text, cursor: at };
 
   const inserted = Array.from(clean);

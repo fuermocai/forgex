@@ -75,8 +75,8 @@ describe('applyInputKey', () => {
     expect(applyInputKey({ text: 'ac', cursor: 1 }, 'b', key())).toEqual({ text: 'abc', cursor: 2 });
   });
 
-  it('粘贴的多行文本压平为单行', () => {
-    expect(applyInputKey({ text: '', cursor: 0 }, 'a\nb', key())).toEqual({ text: 'a b', cursor: 3 });
+  it('粘贴的多行文本保留换行', () => {
+    expect(applyInputKey({ text: '', cursor: 0 }, 'a\nb', key())).toEqual({ text: 'a\nb', cursor: 3 });
   });
 
   it('空字符（功能键）不产生状态变更', () => {
