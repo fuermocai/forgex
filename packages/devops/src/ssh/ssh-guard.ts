@@ -326,10 +326,10 @@ export class SshGuard {
 
 /** EX_UNAVAILABLE is reserved for a missing remote path-diagnostic prerequisite. */
 export const SSH_PATH_UNAVAILABLE_EXIT = 69;
-export const SSH_PATH_REQUIREMENTS = '远端主机不支持此路径诊断。需要 Linux O_PATH、/proc/self/fd、/bin/sh、Python 3、base64 -d 和相应的诊断命令。';
+export const SSH_PATH_REQUIREMENTS = '远端主机不支持此路径诊断。需要 Linux O_PATH、/proc/self/fd、/bin/sh、Python 3.4 或更高版本、base64 -d 和相应的诊断命令。';
 
 // ASCII keeps the preflight usable on hosts with a C locale.
-const remoteRequirements = 'Unsupported SSH path diagnostic: requires Linux O_PATH, /proc/self/fd, /bin/sh, Python 3, base64 -d and the diagnostic utilities.';
+const remoteRequirements = 'Unsupported SSH path diagnostic: requires Linux O_PATH, /proc/self/fd, /bin/sh, Python 3.4 or later, base64 -d and the diagnostic utilities.';
 
 /** Fixed remote program. Open metadata without touching device/FIFO data or requiring read permission.
  * Each utility operates on the pinned object or the directory selected by fchdir.
@@ -415,7 +415,7 @@ function pathDiagnosticCommand(action: PathDiagnostic): string {
   const payload = Buffer.from(JSON.stringify(action)).toString('base64');
   const launcher = [
     `unavailable() { echo "${remoteRequirements}" >&2; exit ${SSH_PATH_UNAVAILABLE_EXIT}; }`,
-    'command -v python3 >/dev/null 2>&1 || unavailable',
+    'python3 -I -c "import sys; sys.exit(sys.version_info < (3, 4) or not sys.flags.isolated)" >/dev/null 2>&1 || unavailable',
     'script=$(printf %s "$1" | base64 -d 2>/dev/null) || unavailable',
     'exec python3 -I -c "$script" "$2"',
   ].join('; ');
