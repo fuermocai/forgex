@@ -34,6 +34,8 @@ export default function App() {
   const [starting, setStarting] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const [showSshHosts, setShowSshHosts] = useState(false);
+  const [sshMismatches, setSshMismatches] = useState<ReadonlySet<string>>(() => new Set());
+  const sshLauncherRef = useRef<HTMLButtonElement>(null);
   const [workspaceView, setWorkspaceView] = useState<'chat' | 'git'>('chat');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -255,7 +257,7 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <AppearancePicker themeId={themeId} onSelect={selectTheme} />
-          <button className="settings-button" type="button" aria-haspopup="dialog" onClick={() => setShowSshHosts(true)}>SSH 主机</button>
+          <button className="settings-button" type="button" aria-haspopup="dialog" ref={sshLauncherRef} onClick={() => setShowSshHosts(true)}>SSH 主机</button>
           <button className="settings-button" onClick={() => {
             setWorkspaceView('chat');
             setShowSetup(true);
@@ -297,7 +299,11 @@ export default function App() {
           {gitVisible && starting && <p className="git-feedback" role="status">正在打开项目…</p>}
         </section>
       </div>
-      {showSshHosts && <SshHostPanel api={window.forgex} onClose={() => setShowSshHosts(false)} />}
+      {showSshHosts && <SshHostPanel api={window.forgex} suspended={approval !== null} mismatches={sshMismatches}
+        setMismatches={setSshMismatches} onClose={() => {
+          setShowSshHosts(false);
+          sshLauncherRef.current?.focus();
+        }} />}
       {approval && <ApprovalDialog key={approval.id} request={approval} queueLength={approvalQueue.length} onResolve={(decision) => void resolveApproval(decision)} />}
       {pendingNavigation && <div className="modal-backdrop navigation-backdrop">
         <section className="navigation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="navigation-title">

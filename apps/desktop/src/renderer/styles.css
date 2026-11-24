@@ -505,7 +505,7 @@ button:disabled:hover { background-color: inherit; }
 }
 .ssh-dialog[open] { display: flex; flex-direction: column; }
 .ssh-dialog::backdrop { background: var(--scrim); }
-.ssh-dialog :is(summary, pre, [tabindex="-1"]):focus-visible { outline: 2px solid var(--arc); outline-offset: 2px; }
+.ssh-dialog :is(summary, pre, [tabindex]):focus-visible { outline: 2px solid var(--arc); outline-offset: 2px; }
 .ssh-header {
   display: flex;
   flex: 0 0 auto;
@@ -585,6 +585,11 @@ button:disabled:hover { background-color: inherit; }
 .ssh-result-summary { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0; }
 .ssh-result-summary dt { color: var(--muted); font-size: 11px; }
 .ssh-result-summary dd { margin: 4px 0 0; }
+.ssh-result-scroll { width: 100%; max-height: 230px; overflow: auto; }
+.ssh-result-table { width: 100%; border-collapse: collapse; text-align: left; font: 11px var(--code-font); }
+.ssh-result-table :is(th, td) { padding: 7px 8px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.ssh-result-table th { background: var(--surface-table-head); white-space: nowrap; }
+.ssh-result-output { width: 100%; }
 .ssh-result details { width: 100%; min-width: 0; }
 .ssh-result summary { width: fit-content; color: var(--text-accent-soft); cursor: pointer; }
 .ssh-result pre { max-height: 230px; overflow: auto; margin: 8px 0 0; padding: 9px; color: var(--text-code); background: var(--surface-code); font-size: 11px; }

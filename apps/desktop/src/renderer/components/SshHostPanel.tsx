@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { Dispatch, FormEvent, Ref, SetStateAction } from 'react';
 import type {
   DesktopApi, RemoteDiagActionDto, SshDiagnosticResult, SshHostOperation, SshHostProfile,
 } from '../../shared/desktop-api.js';
@@ -7,6 +7,9 @@ import type {
 interface SshHostPanelProps {
   api: Pick<DesktopApi, 'listSshHosts' | 'saveSshHost' | 'deleteSshHost' | 'probeSshHost' | 'trustSshHostKey'
     | 'testSshHost' | 'runSshDiagnostic' | 'cancelSshOperation'>;
+  suspended: boolean;
+  mismatches: ReadonlySet<string>;
+  setMismatches: Dispatch<SetStateAction<ReadonlySet<string>>>;
   onClose: () => void;
 }
 
@@ -42,6 +45,7 @@ const GENERAL_DIAGNOSTICS: readonly RemoteDiagActionDto[] = [
 ];
 const PATH_DIAGNOSTICS = ['read_remote_log', 'list_dir', 'stat_file'] as const;
 const FINGERPRINT_MISMATCH = '主机指纹不匹配，连接已阻止';
+type HostAction = 'add' | 'edit' | 'delete' | 'test';
 
 function sshError(reason: unknown): string {
   return reason instanceof Error
@@ -54,16 +58,88 @@ function hostAddress(profile: SshHostProfile): string {
   return `${profile.username}@${hostname}:${profile.port}`;
 }
 
-function DiagnosticResult({ result }: { result: SshDiagnosticResult }) {
+function trustIdentity(profile: SshHostProfile): string {
+  return JSON.stringify([profile.id, profile.host, profile.port, profile.username, profile.hostKeyFingerprint]);
+}
+
+interface DiagnosticTable {
+  headers: string[];
+  rows: string[][];
+}
+
+function diagnosticTable(action: SshDiagnosticResult['action'], output: string): DiagnosticTable | null {
+  const [header = '', ...lines] = output.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  if (action === 'disk_usage') {
+    const columns = /^Filesystem\s+(Type\s+)?Size\s+Used\s+Avail\s+(?:Use%|Capacity)\s+Mounted on$/i.exec(header);
+    if (!columns) return null;
+    const rowPattern = columns[1]
+      ? /^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+%|-)\s+(.+)$/
+      : /^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+%|-)\s+(.+)$/;
+    const rows: string[][] = [];
+    for (const line of lines) {
+      const match = rowPattern.exec(line);
+      if (!match) return null;
+      rows.push(match.slice(1));
+    }
+    return { headers: ['文件系统', ...(columns[1] ? ['类型'] : []), '容量', '已用', '可用', '使用率', '挂载点'], rows };
+  }
+  if (action === 'kernel_modules' && /^Module\s+Size\s+Used by$/i.test(header)) {
+    const rows: string[][] = [];
+    for (const line of lines) {
+      const match = /^(\S+)\s+(\d+)\s+(\d+)(?:\s+(.+))?$/.exec(line);
+      if (!match) return null;
+      rows.push([match[1], match[2], match[3], match[4] ?? '']);
+    }
+    return { headers: ['模块', '大小', '引用数', '引用模块'], rows };
+  }
+  return null;
+}
+
+function uptimeValues(output: string): { label: string; value: string }[] | null {
+  const lines = output.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 3 || (lines.length > 1 && lines[1] !== '---')) return null;
+  const summary = /^(.+?)\s+up\s+(.+?),\s+(\d+\s+users?),\s+load averages?:\s*(.+)$/.exec(lines[0] ?? '');
+  if (!summary) return null;
+  const values = [
+    { label: '主机时间', value: summary[1] }, { label: '已运行', value: summary[2] },
+    { label: '登录用户', value: summary[3] }, { label: '平均负载', value: summary[4] },
+  ];
+  if (lines[2]) values.push({ label: '启动时间', value: lines[2].replace(/^system boot\s+/, '') });
+  return values;
+}
+
+function DiagnosticOutput({ result }: { result: SshDiagnosticResult }) {
+  const output = result.stdout.trimEnd();
+  const table = result.truncated ? null : diagnosticTable(result.action, output);
+  const values = result.action === 'uptime' && !result.truncated ? uptimeValues(output) : null;
+  if (table) return <div className="ssh-result-scroll" tabIndex={0} aria-label="诊断数据">
+    <table className="ssh-result-table" aria-label={DIAGNOSTIC_LABELS[result.action]}>
+      <thead><tr>{table.headers.map((header) => <th key={header} scope="col">{header}</th>)}</tr></thead>
+      <tbody>{table.rows.map((row, rowIndex) => <tr key={rowIndex}>
+        {row.map((cell, columnIndex) => <td key={table.headers[columnIndex]}>{cell}</td>)}
+      </tr>)}</tbody>
+    </table>
+  </div>;
+  if (values) return <dl className="ssh-result-summary" aria-label="运行时间和负载">
+    {values.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+  </dl>;
+  if (output) return <pre className="ssh-result-output" tabIndex={0} aria-label="诊断输出">{output}</pre>;
+  if (result.stderr) return <pre className="ssh-result-output" tabIndex={0} aria-label="标准错误">{result.stderr}</pre>;
+  return <p>本次诊断没有输出。</p>;
+}
+
+function DiagnosticResult({ result, titleRef }: { result: SshDiagnosticResult; titleRef: Ref<HTMLHeadingElement> }) {
   const outcome = result.timedOut ? '已超时' : result.exitCode === 0 ? '已完成' : '执行失败';
   return <section className="ssh-result" aria-labelledby="ssh-result-title">
-    <h3 id="ssh-result-title">{DIAGNOSTIC_LABELS[result.action]}</h3>
+    <h3 id="ssh-result-title" ref={titleRef} tabIndex={-1}>{DIAGNOSTIC_LABELS[result.action]}</h3>
     <dl className="ssh-result-summary" role="status">
       <div><dt>结果</dt><dd className={result.exitCode === 0 && !result.timedOut ? 'ssh-success' : 'ssh-warning'}>{outcome}</dd></div>
       <div><dt>耗时</dt><dd>{result.durationMs} ms</dd></div>
       <div><dt>退出码</dt><dd>{result.exitCode ?? '无'}</dd></div>
       <div><dt>输出</dt><dd>{result.truncated ? '已截断' : '完整'}</dd></div>
     </dl>
+    <DiagnosticOutput result={result} />
     <details>
       <summary>原始输出</summary>
       {result.stdout && <pre tabIndex={0} aria-label="标准输出">{result.stdout}</pre>}
@@ -74,20 +150,24 @@ function DiagnosticResult({ result }: { result: SshDiagnosticResult }) {
 }
 
 /** Manages saved SSH hosts, fingerprint verification and fixed read-only diagnostics. */
-export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
+export function SshHostPanel({ api, suspended, mismatches, setMismatches, onClose }: SshHostPanelProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  const deleteButtonRef = useRef<HTMLButtonElement>(null);
   const editorNameRef = useRef<HTMLInputElement>(null);
   const reviewTitleRef = useRef<HTMLHeadingElement>(null);
   const deleteCancelRef = useRef<HTMLButtonElement>(null);
   const testButtonRef = useRef<HTMLButtonElement>(null);
   const errorRef = useRef<HTMLParagraphElement>(null);
+  const resultTitleRef = useRef<HTMLHeadingElement>(null);
   const pendingRef = useRef<PendingOperation | null>(null);
   const [hosts, setHosts] = useState<SshHostProfile[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editor, setEditor] = useState<HostEditor | null>(null);
   const [review, setReview] = useState<FingerprintReview | null>(null);
-  const [mismatch, setMismatch] = useState(false);
   const [verified, setVerified] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState(false);
   const [pending, setPending] = useState<PendingOperation | null>(null);
@@ -97,13 +177,32 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
   const [result, setResult] = useState<SshDiagnosticResult | null>(null);
   const [unit, setUnit] = useState('');
   const [remotePath, setRemotePath] = useState('');
+  const [focusRequest, setFocusRequest] = useState<HostAction | null>(null);
 
   const selected = hosts.find((host) => host.id === selectedId);
+  const mismatch = selected !== undefined && mismatches.has(trustIdentity(selected));
   const locked = pending !== null || editor !== null || deleteConfirmation || review !== null;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dialog = dialogRef.current;
-    dialog?.showModal();
+    if (!dialog) return;
+    if (suspended && dialog.open) {
+      const active = document.activeElement;
+      previousFocusRef.current = active instanceof HTMLElement && dialog.contains(active) ? active : null;
+      dialog.close();
+    } else if (!suspended && !dialog.open) {
+      dialog.showModal();
+      const previousFocus = previousFocusRef.current;
+      if (previousFocus && dialog.contains(previousFocus) && !previousFocus.matches(':disabled')) {
+        previousFocus.focus();
+      } else {
+        (errorRef.current ?? editorNameRef.current ?? reviewTitleRef.current ?? deleteCancelRef.current ?? resultTitleRef.current)?.focus();
+      }
+      previousFocusRef.current = null;
+    }
+  }, [suspended]);
+
+  useEffect(() => {
     return () => {
       const operationId = pendingRef.current?.operationId;
       pendingRef.current = null;
@@ -111,7 +210,6 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
         // Main also aborts outstanding operations when the window closes.
         void api.cancelSshOperation(operationId).catch(() => undefined);
       }
-      dialog?.close();
     };
   }, [api]);
 
@@ -144,13 +242,32 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
     if (deleteConfirmation) deleteCancelRef.current?.focus();
   }, [deleteConfirmation]);
   useEffect(() => {
-    if (error || (mismatch && !review && !pending)) errorRef.current?.focus();
-  }, [error, mismatch, pending, review]);
+    if (result) resultTitleRef.current?.focus();
+  }, [result]);
+  useEffect(() => {
+    if (error || (mismatch && !review && !locked)) errorRef.current?.focus();
+  }, [error, locked, mismatch, review]);
+  useEffect(() => {
+    if (!focusRequest || suspended || locked) return;
+    const actions = { add: addButtonRef, edit: editButtonRef, delete: deleteButtonRef, test: testButtonRef };
+    actions[focusRequest].current?.focus();
+    setFocusRequest(null);
+  }, [focusRequest, locked, suspended]);
+
+  const recordMismatch = (profile: SshHostProfile, blocked: boolean) => {
+    const identity = trustIdentity(profile);
+    setMismatches((current) => {
+      if (current.has(identity) === blocked) return current;
+      const next = new Set(current);
+      if (blocked) next.add(identity);
+      else next.delete(identity);
+      return next;
+    });
+  };
 
   const changeSelection = (id: string | null) => {
     setSelectedId(id);
     setReview(null);
-    setMismatch(false);
     setVerified(false);
     setError('');
     setNotice('');
@@ -172,7 +289,7 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
       if (pendingRef.current !== operation) return;
       const message = sshError(reason);
       if (message.startsWith(FINGERPRINT_MISMATCH)) {
-        setMismatch(true);
+        if (selected) recordMismatch(selected, true);
         setVerified(false);
         setResult(null);
         setReview(null);
@@ -211,7 +328,7 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
   };
 
   const closePanel = () => {
-    if (pendingRef.current && !pendingRef.current.operationId) return;
+    if (suspended || (pendingRef.current && !pendingRef.current.operationId)) return;
     dialogRef.current?.close();
     onClose();
   };
@@ -230,10 +347,12 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
     if (!editor) return;
     const input = { ...editor, name: editor.name.trim(), host: editor.host.trim(), port: Number(editor.port), username: editor.username.trim() };
     void run({ label: '正在保存主机…' }, () => api.saveSshHost(input), (saved) => {
+      if (selected?.id === saved.id && trustIdentity(selected) !== trustIdentity(saved)) recordMismatch(selected, false);
       setHosts((current) => editor.id === undefined ? [...current, saved] : current.map((host) => host.id === saved.id ? saved : host));
       changeSelection(saved.id);
       setEditor(null);
       setNotice('已保存主机。');
+      setFocusRequest('edit');
     });
   };
 
@@ -243,10 +362,10 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
     setResult(null);
     runHostOperation('正在探测主机指纹…', (input) => api.probeSshHost(input), ({ fingerprint }) => {
       if (fingerprint === selected.hostKeyFingerprint) {
-        setMismatch(false);
+        recordMismatch(selected, false);
         setNotice('主机指纹与已信任的指纹一致。请测试连接。');
       } else {
-        setMismatch(selected.hostKeyFingerprint !== null);
+        if (selected.hostKeyFingerprint) recordMismatch(selected, true);
         setReview({ fingerprint, previous: selected.hostKeyFingerprint });
       }
     });
@@ -257,9 +376,9 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
     void run({ label: '正在保存指纹…' }, () => api.trustSshHostKey({ id: selected.id, fingerprint: review.fingerprint }), (saved) => {
       setHosts((current) => current.map((host) => host.id === saved.id ? saved : host));
       setReview(null);
-      setMismatch(false);
+      recordMismatch(selected, false);
       setNotice('已保存信任的指纹。请测试连接。');
-      requestAnimationFrame(() => testButtonRef.current?.focus());
+      setFocusRequest('test');
     });
   };
 
@@ -286,10 +405,12 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
     if (!selected) return;
     void run({ label: '正在删除主机…' }, () => api.deleteSshHost(selected.id), () => {
       const remaining = hosts.filter((host) => host.id !== selected.id);
+      recordMismatch(selected, false);
       setHosts(remaining);
       changeSelection(remaining[0]?.id ?? null);
       setDeleteConfirmation(false);
       setNotice('已删除主机配置。');
+      setFocusRequest(remaining.length ? 'edit' : 'add');
     });
   };
 
@@ -305,13 +426,15 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
       <section className="ssh-hosts" aria-labelledby="ssh-host-list-title">
         <div className="ssh-row">
           <h3 id="ssh-host-list-title">主机配置</h3>
-          <button type="button" className="secondary-button" disabled={!loaded || locked} onClick={() => openEditor()}>添加主机</button>
+          <button type="button" className="secondary-button" ref={addButtonRef} disabled={!loaded || locked} onClick={() => openEditor()}>添加主机</button>
         </div>
         {!loaded && <p role="status">正在读取主机…</p>}
         {loaded && hosts.length === 0 && !error && <p>尚未添加主机。</p>}
         <ul>
           {hosts.map((host) => <li key={host.id}>
-            <button type="button" aria-pressed={host.id === selectedId} className="ssh-host-select" disabled={locked} onClick={() => changeSelection(host.id)}>
+            <button type="button" aria-pressed={host.id === selectedId} className="ssh-host-select" disabled={locked} onClick={() => {
+              if (host.id !== selectedId) changeSelection(host.id);
+            }}>
               <strong>{host.name}</strong>
               <code>{hostAddress(host)}</code>
             </button>
@@ -339,21 +462,33 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
             </label>
             <div className="ssh-actions ssh-field-wide">
               <button type="submit" className="send-button">保存主机</button>
-              <button type="button" className="secondary-button" onClick={() => { setEditor(null); setError(''); }}>取消编辑</button>
+              <button type="button" className="secondary-button" onClick={() => {
+                setFocusRequest(editor.id ? 'edit' : 'add');
+                setEditor(null);
+                setError('');
+              }}>取消编辑</button>
             </div>
           </fieldset>
         </form> : selected ? <>
           <div className="ssh-row ssh-host-heading">
             <div><h3>{selected.name}</h3><code>{hostAddress(selected)}</code></div>
             <div className="ssh-actions">
-              <button type="button" className="secondary-button" disabled={locked} onClick={() => openEditor(selected)}>编辑</button>
-              <button type="button" className="secondary-button" disabled={locked} onClick={() => { setDeleteConfirmation(true); setError(''); setNotice(''); }}>删除…</button>
+              <button type="button" className="secondary-button" ref={editButtonRef} disabled={locked} onClick={() => openEditor(selected)}>编辑</button>
+              <button type="button" className="secondary-button" ref={deleteButtonRef} disabled={locked} onClick={() => {
+                setDeleteConfirmation(true);
+                setError('');
+                setNotice('');
+              }}>删除…</button>
             </div>
           </div>
           {deleteConfirmation ? <section className="ssh-review" aria-labelledby="ssh-delete-title">
             <h3 id="ssh-delete-title">删除「{selected.name}」的配置？</h3>
             <div className="ssh-actions">
-              <button type="button" className="secondary-button" ref={deleteCancelRef} disabled={pending !== null} onClick={() => { setDeleteConfirmation(false); setError(''); }}>取消删除</button>
+              <button type="button" className="secondary-button" ref={deleteCancelRef} disabled={pending !== null} onClick={() => {
+                setDeleteConfirmation(false);
+                setError('');
+                setFocusRequest('delete');
+              }}>取消删除</button>
               <button type="button" className="cancel-button" disabled={pending !== null} onClick={deleteHost}>确认删除</button>
             </div>
           </section> : review ? <section className={`ssh-review${review.previous ? ' ssh-review-warning' : ''}`} aria-labelledby="ssh-review-title">
@@ -367,7 +502,7 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
               <button type="button" className="secondary-button" disabled={pending !== null} onClick={() => {
                 setReview(null);
                 setError('');
-                requestAnimationFrame(() => testButtonRef.current?.focus());
+                setFocusRequest('test');
               }}>暂不信任</button>
               <button type="button" className={review.previous ? 'cancel-button' : 'send-button'} disabled={pending !== null} onClick={trustFingerprint}>
                 {review.previous ? '确认更新信任指纹' : '确认并信任此指纹'}
@@ -413,7 +548,7 @@ export function SshHostPanel({ api, onClose }: SshHostPanelProps) {
                 onClick={() => diagnose({ action, path: remotePath.trim() })}>{DIAGNOSTIC_LABELS[action]}</button>)}
             </div>
           </div>
-          {result && <DiagnosticResult result={result} />}
+          {result && <DiagnosticResult result={result} titleRef={resultTitleRef} />}
         </section>}
       </section>
     </div>
