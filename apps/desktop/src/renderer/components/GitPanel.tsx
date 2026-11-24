@@ -278,6 +278,7 @@ export function GitPanel({ projectPath, visible, suspended, api }: GitPanelProps
         <dialog ref={confirmation} onClose={() => setPending(null)} className="git-confirmation" aria-labelledby="git-confirmation-title" aria-describedby="git-confirmation-description">
           <h2 id="git-confirmation-title">提交 {pending?.count} 个已暂存文件？</h2>
           <div id="git-confirmation-description">
+            <p>提交目标：{pending?.snapshot.headRef?.replace(/^refs\/heads\//, '') ?? '分离的 HEAD'}</p>
             <p>ForgeX 将跳过仓库的 Git 钩子。本次提交只包含已暂存的内容。</p>
             <pre>{pending?.message}</pre>
           </div>

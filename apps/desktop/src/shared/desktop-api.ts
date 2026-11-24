@@ -97,9 +97,11 @@ export interface GitFileEntry {
   conflicted: boolean;
 }
 
-/** Immutable tree and its expected parent. An empty head denotes an unborn branch. */
+/** Immutable tree and expected parent. An empty head denotes an unborn branch. */
 export interface GitSnapshot {
   head: string;
+  /** Immediate symbolic HEAD target, or null when detached. */
+  headRef: string | null;
   tree: string;
 }
 

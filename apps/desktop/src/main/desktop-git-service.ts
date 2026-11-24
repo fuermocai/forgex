@@ -59,13 +59,14 @@ export class DesktopGitService {
   /** Reports branch information and all changed paths. */
   async status(root: string): Promise<GitStatusResult> {
     return withPrivateIndex(root, false, async (git) => {
+      const headRef = await readHeadRef(git);
       const head = await readHead(git);
       const status = await readStatus(git, root);
       if (status.entries.some((entry) => entry.indexStatus !== ' ' && entry.indexStatus !== '?')
         && !status.entries.some((entry) => entry.conflicted)) {
-        status.snapshot = { head, tree: (await git(['write-tree'])).trim() };
+        status.snapshot = { head, headRef, tree: (await git(['write-tree'])).trim() };
       }
-      if (head !== await readHead(git)) throw new Error('Git HEAD 已变更，请刷新后重试');
+      if (head !== await readHead(git) || headRef !== await readHeadRef(git)) throw new Error('Git HEAD 已变更，请刷新后重试');
       return status;
     });
   }
@@ -74,7 +75,8 @@ export class DesktopGitService {
   async diff(root: string, path: string, staged: boolean): Promise<string> {
     const file = toRelativeGitPath(path);
     const git = await openRepository(root);
-    await inspectFilePath(root, file, git);
+    const head = staged ? await readHead(git) : '';
+    await inspectFilePath(root, file, git, head);
     const status = await readStatus(git, root);
     const entry = status.entries.find((candidate) => candidate.path === file && (staged
       ? candidate.indexStatus !== ' ' && candidate.indexStatus !== '?'
@@ -89,7 +91,7 @@ export class DesktopGitService {
     const paths = [file];
     if ((side === 'R' || side === 'C') && entry?.originalPath) {
       const original = toRelativeGitPath(entry.originalPath);
-      await inspectFilePath(root, original, git);
+      await inspectFilePath(root, original, git, head);
       paths.push(original);
     }
     return git(['diff', ...options, ...(staged ? ['--cached'] : []), '--', ...literalPathspecs(paths)]);
@@ -111,8 +113,8 @@ export class DesktopGitService {
       throw new Error('提交说明不能为空、包含空字符或超出长度限制');
     }
     return this.mutate(() => withPrivateIndex(root, false, async (git) => {
-      const { head, tree } = snapshot;
-      if (head !== await readHead(git) || tree !== (await git(['write-tree'])).trim()) {
+      const { head, headRef, tree } = snapshot;
+      if (head !== await readHead(git) || headRef !== await readHeadRef(git) || tree !== (await git(['write-tree'])).trim()) {
         throw new Error('暂存内容或 HEAD 已变更，请刷新并重新确认');
       }
       const parentTree = head ? (await git(['rev-parse', `${head}^{tree}`])).trim()
@@ -123,10 +125,18 @@ export class DesktopGitService {
           throw new Error('请先在 Git 中完成正在进行的仓库操作');
         }
       }
-      // commit-tree never consults the live index. update-ref compares the parent
-      // under Git's ref lock, including the all-zero precondition for an unborn HEAD.
       const commit = (await git(['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', message])).trim();
-      await git(['update-ref', '-m', `commit: ${message.split('\n')[0]}`, 'HEAD', commit, head || '0'.repeat(tree.length)]);
+      // Preparing a HEAD update locks HEAD and its referent, and checks the old OID.
+      // Only acknowledge the prepared update while HEAD still names the reviewed branch.
+      await git(['update-ref', '-m', `commit: ${message.split('\n')[0]}`, '--stdin'], {
+        commit, parent: head || '0'.repeat(tree.length),
+        verifyPrepared: async () => {
+          if (headRef !== await readHeadRef(git)) throw new Error('Git HEAD 已变更，请刷新并重新确认');
+          if (headRef && await git(['symbolic-ref', '--quiet', '--no-recurse', headRef], 'head-missing')) {
+            throw new Error('请在 Git 中提交到间接符号引用');
+          }
+        },
+      });
       return { commit };
     }));
   }
@@ -137,8 +147,10 @@ export class DesktopGitService {
     }
     const files = paths.map((path) => toRelativeGitPath(path));
     await this.mutate(() => withPrivateIndex(root, true, async (git) => {
+      const head = action === 'unstage' ? await readHead(git) : '';
+      const restoringGitlinks = new Set<string>();
       for (const file of files) {
-        await inspectFilePath(root, file, git);
+        if (await inspectFilePath(root, file, git, head) === 'gitlink' && head) restoringGitlinks.add(file);
       }
       const status = await readStatus(git, root);
       const changedPaths = new Set<string>();
@@ -151,12 +163,9 @@ export class DesktopGitService {
       if (files.some((file) => !changedPaths.has(file))) {
         throw new Error('Git 文件状态已变更，请刷新后重试');
       }
-      if (hasFileDirectoryConflict(files, changedPaths)) {
+      if (hasFileDirectoryConflict(files, changedPaths, restoringGitlinks)) {
         throw new Error(FILE_DIRECTORY_CONFLICT);
       }
-      const head = action === 'unstage'
-        ? (await git(['rev-parse', '--verify', '--quiet', 'HEAD'], 'head-missing')).trim()
-        : '';
       const pathspecs = literalPathspecs(files);
       await checkIndexAndTreePaths(git, files, head);
       const otherEntries = ['ls-files', '--stage', '-v', '-z', '--', ...files.map((file) => `:(top,exclude,literal)${file}`)];
@@ -188,7 +197,12 @@ export class DesktopGitService {
   }
 }
 
-type GitCommandMode = 'head-missing' | 'path-query' | 'index-digest';
+interface RefTransaction {
+  commit: string;
+  parent: string;
+  verifyPrepared(): Promise<void>;
+}
+type GitCommandMode = 'head-missing' | 'path-query' | 'index-digest' | RefTransaction;
 type GitCommand = (args: string[], mode?: GitCommandMode, indexPath?: string) => Promise<string>;
 
 function ignoreMissing(error: unknown): undefined {
@@ -198,6 +212,12 @@ function ignoreMissing(error: unknown): undefined {
 
 async function readHead(git: GitCommand): Promise<string> {
   return (await git(['rev-parse', '--verify', '--quiet', 'HEAD'], 'head-missing')).trim();
+}
+
+async function readHeadRef(git: GitCommand): Promise<string | null> {
+  const ref = await git(['symbolic-ref', '--quiet', '--no-recurse', 'HEAD'], 'head-missing');
+  if (ref.includes('\uFFFD')) throw new Error('无法解码 Git 分支名称');
+  return ref.replace(/\r?\n$/, '') || null;
 }
 
 async function gitPath(git: GitCommand, name: string): Promise<string> {
@@ -235,8 +255,8 @@ async function withPrivateIndex<T>(root: string, publish: boolean, operation: (g
     }
     return result;
   } finally {
-    if (locked) await rm(lock, { force: true });
-    await rm(directory, { recursive: true, force: true });
+    if (locked) await rm(lock, { force: true }).catch(() => console.warn('无法清理 Git 索引锁'));
+    await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => console.warn('无法清理临时 Git 目录'));
   }
 }
 
@@ -315,11 +335,20 @@ function runGit(executable: string, cwd: string, args: string[], mode?: GitComma
     });
   });
   return new Promise((fulfill, reject) => {
-    execFile(executable, argv, {
+    let verificationFailure: Error | undefined;
+    const child = execFile(executable, argv, {
       ...options,
       maxBuffer: mode === 'path-query' ? GIT_PATH_QUERY_BYTES : GIT_MAX_OUTPUT_BYTES,
       encoding: 'utf8',
     }, (error, stdout, stderr) => {
+      if (verificationFailure) {
+        reject(verificationFailure);
+        return;
+      }
+      if (typeof mode === 'object' && !error && !stdout.endsWith('commit: ok\n')) {
+        reject(new Error('Git 引用事务未完成'));
+        return;
+      }
       const expectedFailure = error?.code === 1 && mode === 'head-missing' && stdout.length === 0 && stderr.length === 0;
       if (!error || expectedFailure) {
         fulfill(stdout);
@@ -334,6 +363,30 @@ function runGit(executable: string, cwd: string, args: string[], mode?: GitComma
         reject(new Error(detail ? `Git 操作失败：${detail}` : 'Git 操作失败，无法完成当前请求'));
       }
     });
+    if (typeof mode === 'object') {
+      const input = child.stdin;
+      if (!input || !child.stdout) {
+        child.kill();
+        reject(new Error('无法启动 Git 引用事务'));
+        return;
+      }
+      input.on('error', (error) => reject(error));
+      let response = '';
+      const onPrepare = (chunk: string) => {
+        response += chunk;
+        if (!response.endsWith('prepare: ok\n')) return;
+        child.stdout?.off('data', onPrepare);
+        void mode.verifyPrepared().then(
+          () => input.end('commit\n'),
+          (error: unknown) => {
+            verificationFailure = error instanceof Error ? error : new Error('无法验证 Git HEAD');
+            input.end('abort\n');
+          },
+        );
+      };
+      child.stdout.on('data', onPrepare);
+      input.write(`start\nupdate HEAD ${mode.commit} ${mode.parent}\nprepare\n`);
+    }
   });
 }
 
@@ -406,7 +459,7 @@ async function readGitPathRecords(git: GitCommand, args: string[]): Promise<stri
   return records;
 }
 
-function hasFileDirectoryConflict(files: string[], candidatePaths: ReadonlySet<string>): boolean {
+function hasFileDirectoryConflict(files: string[], candidatePaths: ReadonlySet<string>, restoringGitlinks: ReadonlySet<string>): boolean {
   const selected = new Set(files);
   const selectedParents = new Set<string>();
   for (const file of files) {
@@ -419,7 +472,10 @@ function hasFileDirectoryConflict(files: string[], candidatePaths: ReadonlySet<s
       return true;
     }
     for (const parent of parentGitPaths(candidate)) {
-      if (selected.has(parent)) {
+      // Porcelain also reports "module/" as untracked after rm --cached.
+      // A staged restore touches only the index. Its index/tree boundary
+      // checks below independently reject real descendants in either source.
+      if (selected.has(parent) && !restoringGitlinks.has(parent)) {
         return true;
       }
     }
@@ -433,7 +489,7 @@ function* parentGitPaths(path: string): Iterable<string> {
   }
 }
 
-async function inspectFilePath(root: string, path: string, git: GitCommand): Promise<'file' | 'symlink' | 'gitlink' | undefined> {
+async function inspectFilePath(root: string, path: string, git: GitCommand, head: string): Promise<'file' | 'symlink' | 'gitlink' | undefined> {
   const segments = path.split('/');
   let target = root;
   for (const [index, segment] of segments.entries()) {
@@ -459,7 +515,13 @@ async function inspectFilePath(root: string, path: string, git: GitCommand): Pro
       }
       if (info.isDirectory()) {
         const entries = await readGitPathRecords(git, ['ls-files', '--stage', '-z', '--', ...literalPathspecs([path])]);
-        if (entries.length === 1 && entries[0].startsWith('160000 ') && entries[0].slice(entries[0].indexOf('\t') + 1) === path) return 'gitlink';
+        const isExactGitlink = (entry: string) =>
+          entry.startsWith('160000 ') && entry.slice(entry.indexOf('\t') + 1) === path;
+        if (entries.some(isExactGitlink)) return 'gitlink';
+        if (entries.length === 0 && head) {
+          const previous = await readGitPathRecords(git, ['--literal-pathspecs', 'ls-tree', '-z', head, '--', path]);
+          if (previous.some(isExactGitlink)) return 'gitlink';
+        }
       }
       throw new Error('指定路径不是工作区内的文件');
     } else {

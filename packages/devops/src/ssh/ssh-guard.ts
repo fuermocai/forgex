@@ -340,7 +340,9 @@ import base64
 import json
 import os
 import shutil
+import signal
 import stat
+import subprocess
 import sys
 
 def has_prerequisites(request):
@@ -358,6 +360,21 @@ def has_prerequisites(request):
     except (AttributeError, OSError):
         return False
 
+def list_directory(depth):
+    # head bounds traversal by closing the pipe at the limit. Preserve any
+    # diagnostic find emitted before that intentional SIGPIPE.
+    with subprocess.Popen(["head", "-n", "200"], stdin=subprocess.PIPE) as limiter:
+        with subprocess.Popen(["find", "-P", ".", "-mindepth", "1", "-maxdepth", str(depth), "-ls"],
+                              stdout=limiter.stdin, stderr=subprocess.PIPE) as listing:
+            limiter.stdin.close()
+            had_error = False
+            for chunk in iter(lambda: listing.stderr.read(4096), b""):
+                sys.stderr.buffer.write(chunk)
+                had_error = True
+            status = listing.wait()
+        if limiter.wait() != 0 or had_error or status not in (0, -signal.SIGPIPE):
+            sys.exit(1)
+
 def inspect_target(request):
     fd = os.open(request["path"], os.O_PATH | os.O_CLOEXEC)
     try:
@@ -373,8 +390,8 @@ def inspect_target(request):
             os.execlp("stat", "stat", "-L", "--", ref)
         if action == "list_dir" and stat.S_ISDIR(mode):
             os.fchdir(fd)
-            script = 'find -P . -mindepth 1 -maxdepth "$1" -ls | head -200'
-            os.execl("/bin/sh", "sh", "-c", script, "sh", str(request["depth"]))
+            list_directory(request["depth"])
+            return
         if action == "read_remote_log" and stat.S_ISREG(mode):
             # Opening through this descriptor cannot switch to a different inode.
             data_fd = os.open(ref, os.O_RDONLY | os.O_NONBLOCK)

@@ -160,10 +160,12 @@ export function registerShellIpcHandlers(owner: BrowserWindow, runtime: DesktopR
     const snapshot = input.snapshot;
     const oid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
     if (!isRecord(snapshot) || typeof snapshot.tree !== 'string' || !oid.test(snapshot.tree)
-      || typeof snapshot.head !== 'string' || (snapshot.head !== '' && !oid.test(snapshot.head))) {
+      || typeof snapshot.head !== 'string' || (snapshot.head !== '' && !oid.test(snapshot.head))
+      || (snapshot.headRef !== null && (typeof snapshot.headRef !== 'string'
+        || !snapshot.headRef.startsWith('refs/heads/') || snapshot.headRef.length > 4096))) {
       throw new Error('提交快照无效，请刷新后重试');
     }
-    return runtime.commitGit({ message: input.message, snapshot: { head: snapshot.head, tree: snapshot.tree } });
+    return runtime.commitGit({ message: input.message, snapshot: { head: snapshot.head, headRef: snapshot.headRef, tree: snapshot.tree } });
   };
 
   const sshHandlers = new Map<string, (input: unknown) => unknown>([
