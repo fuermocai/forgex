@@ -296,36 +296,32 @@ export class SshGuard {
         };
 
       case 'read_remote_log': {
-        const safePath = escapeShellArg(action.path);
         const grepPart = action.grep
           ? ` | grep -F -n -- ${escapeShellArg(action.grep)} || true`
           : '';
         return {
           action: 'read_remote_log',
-          shellCommand: `tail -n ${action.lines} ${safePath}${grepPart}`,
+          shellCommand: withAllowedTarget(action.path, 'file', `tail -n ${action.lines} <&3${grepPart}`),
           timeoutMs: 20_000,
           maxOutputBytes: 64 * 1024,
         };
       }
 
       case 'list_dir': {
-        const safePath = escapeShellArg(action.path);
         return {
           action: 'list_dir',
-          shellCommand:
-            action.depth > 1
-              ? `ls -lah --color=never -d ${safePath} && find ${safePath} -maxdepth ${action.depth - 1} -type f -ls 2>/dev/null | head -200`
-              : `ls -lah --color=never -d ${safePath}`,
+          shellCommand: withAllowedTarget(action.path, 'directory', action.depth > 1
+            ? `cd -P "$target" && ls -lah --color=never -d . && find -P . -maxdepth ${action.depth - 1} -type f -ls | head -200`
+            : 'cd -P "$target" && ls -lah --color=never -d .'),
           timeoutMs: 15_000,
           maxOutputBytes: 48 * 1024,
         };
       }
 
       case 'stat_file': {
-        const safePath = escapeShellArg(action.path);
         return {
           action: 'stat_file',
-          shellCommand: `stat ${safePath} 2>/dev/null || stat -f %N:%s:%p -x ${safePath} 2>/dev/null || echo 'stat not available'`,
+          shellCommand: withAllowedTarget(action.path, 'either', 'stat -L -- "$target"'),
           timeoutMs: 10_000,
           maxOutputBytes: 16 * 1024,
         };
@@ -352,6 +348,27 @@ export class SshGuard {
 /* ------------------------------------------------------------------ */
 /* 辅助函数                                                              */
 /* ------------------------------------------------------------------ */
+
+/** Open a descriptor once, check its kernel-resolved location, and use that same object.
+ * Linux /proc/self/fd and readlink are required for path-based diagnostics.
+ */
+function withAllowedTarget(path: string, kind: 'file' | 'directory' | 'either', command: string): string {
+  const allowed = ALLOWED_LOG_DIRS.flatMap(root => [root.slice(0, -1), root + '*']).join('|');
+  const typeCheck = kind === 'file' ? '[ -f "$target" ]'
+    : kind === 'directory' ? '[ -d "$target" ]' : '{ [ -f "$target" ] || [ -d "$target" ]; }';
+  return [
+    "deny() { printf '%s\\n' 'SSH diagnostic path is unavailable or outside allowed roots' >&2; exit 1; }",
+    'target=' + escapeShellArg(path),
+    typeCheck + ' || deny',
+    'exec 3< "$target" || deny',
+    // Preserve trailing newlines in actual filenames through shell command substitution.
+    'resolved=$(readlink -n -- /proc/self/fd/3 && printf .) || deny',
+    'case "${resolved%.}" in ' + allowed + ') ;; *) deny ;; esac',
+    'target=/proc/self/fd/3',
+    typeCheck + ' || deny',
+    command,
+  ].join('\n');
+}
 
 function escapeShellArg(raw: string): string {
   if (/[\x00-\x1f]/.test(raw)) throw new ForgeError('SSH_ARG_INVALID', '参数包含非法控制字符');

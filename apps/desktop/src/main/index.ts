@@ -70,13 +70,27 @@ async function createWindow(): Promise<void> {
   else await window.loadFile(rendererFile);
 }
 
-app.whenReady().then(() => {
-  if (process.platform === 'win32') Menu.setApplicationMenu(null);
-  void createWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+function showMainWindow(): void {
+  const window = BrowserWindow.getAllWindows()[0];
+  if (!window) {
+    void createWindow();
+    return;
+  }
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+}
+
+if (app.requestSingleInstanceLock()) {
+  app.whenReady().then(() => {
+    if (process.platform === 'win32') Menu.setApplicationMenu(null);
+    showMainWindow();
+    app.on('activate', showMainWindow);
+    app.on('second-instance', showMainWindow);
   });
-});
+} else {
+  app.quit();
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

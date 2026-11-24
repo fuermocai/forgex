@@ -1,4 +1,5 @@
-import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { constants } from 'node:fs';
+import { open } from 'node:fs/promises';
 import ssh2, { type Client, type ConnectConfig } from 'ssh2';
 import { ForgeError, type JsonValue } from '@forgex/shared';
 import type { GuardedSpec } from './ssh-guard.js';
@@ -7,24 +8,33 @@ import type { SshExecuteResult, SshExecSpec, SshHostConfig } from './types.js';
 const CONNECT_TIMEOUT_MS = 10_000;
 type Endpoint = Pick<SshHostConfig, 'host' | 'port' | 'username'>;
 
-function readPrivateKey(path: string): Buffer {
-  let fd: number | undefined;
+async function readPrivateKey(path: string, signal: AbortSignal): Promise<Buffer> {
+  let data: Buffer | undefined;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
-    const info = fstatSync(fd);
-    if (!info.isFile() || info.size < 1 || info.size > 1024 * 1024) throw new Error();
-    const data = Buffer.alloc(info.size);
-    let offset = 0;
-    while (offset < data.length) {
-      const bytes = readSync(fd, data, offset, data.length - offset, null);
-      if (!bytes) throw new Error();
-      offset += bytes;
+    signal.throwIfAborted();
+    const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      signal.throwIfAborted();
+      const info = await file.stat();
+      signal.throwIfAborted();
+      if (!info.isFile() || info.size < 1 || info.size > 1024 * 1024) throw new Error();
+      data = Buffer.alloc(info.size);
+      let offset = 0;
+      while (offset < data.length) {
+        const { bytesRead } = await file.read(data, offset, data.length - offset, null);
+        signal.throwIfAborted();
+        if (!bytesRead) throw new Error();
+        offset += bytesRead;
+      }
+    } finally {
+      await file.close();
     }
+    signal.throwIfAborted();
     return data;
   } catch {
+    data?.fill(0);
+    signal.throwIfAborted();
     throw new ForgeError('SSH_AUTH_FAILED', '无法读取私钥，请检查文件路径和读取权限');
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -62,10 +72,20 @@ function endpointConfig(host: Endpoint, timeout = CONNECT_TIMEOUT_MS): ConnectCo
   return { host: host.host, port: host.port ?? 22, username: host.username, readyTimeout: timeout, hostHash: 'sha256' };
 }
 
-function authenticate(client: Client, host: SshHostConfig, reject: (err: Error) => void, timeout?: number): void {
+async function authenticate(
+  client: Client, host: SshHostConfig, reject: (err: Error) => void, signal?: AbortSignal, timeout = CONNECT_TIMEOUT_MS,
+): Promise<void> {
   if (!host.hostKeyFingerprint) throw new ForgeError('SSH_HOSTKEY_MISSING', '请先核对并信任主机指纹');
-  const privateKey = readPrivateKey(host.privateKeyPath);
+  const deadline = AbortSignal.timeout(timeout);
+  const readSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  // A kernel open/read may outlive cancellation. Release the caller immediately;
+  // readPrivateKey disposes the eventual descriptor/buffer before control can reach connect().
+  const onTimeout = () => reject(new ForgeError('TOOL_TIMEOUT', '读取私钥超时'));
+  deadline.addEventListener('abort', onTimeout, { once: true });
+  let privateKey: Buffer | undefined;
   try {
+    privateKey = await readPrivateKey(host.privateKeyPath, readSignal);
+    readSignal.throwIfAborted();
     client.connect({
       ...endpointConfig(host, timeout),
       privateKey,
@@ -77,10 +97,13 @@ function authenticate(client: Client, host: SshHostConfig, reject: (err: Error) 
         return false;
       },
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof ForgeError) throw err;
+    readSignal.throwIfAborted();
     throw new ForgeError('SSH_AUTH_FAILED', '私钥无效或已加密，请选择可读取的无口令私钥');
   } finally {
-    privateKey.fill(0);
+    deadline.removeEventListener('abort', onTimeout);
+    privateKey?.fill(0);
   }
 }
 
@@ -98,7 +121,7 @@ export class SshClient {
   testConnection(host: SshHostConfig, signal: AbortSignal): Promise<void> {
     return withClient<void>(signal, (client, resolve, reject) => {
       client.once('ready', resolve);
-      authenticate(client, host, reject);
+      void authenticate(client, host, reject, signal).catch(reject);
     });
   }
 
@@ -137,7 +160,7 @@ export class SshClient {
             });
           });
         });
-        authenticate(client, host, reject, spec.options?.connectTimeoutMs);
+        void authenticate(client, host, reject, signal, spec.options?.connectTimeoutMs).catch(reject);
       });
     } catch (err) {
       if (!signal?.aborted) throw err;
