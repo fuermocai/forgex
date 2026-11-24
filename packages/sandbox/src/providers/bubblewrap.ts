@@ -19,7 +19,7 @@
  * 已经能保证 bwrap 死后沙箱内进程全部回收。
  */
 import { accessSync, constants, existsSync, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join, parse, relative, resolve as resolvePath } from 'node:path';
+import { delimiter, isAbsolute, join, parse, relative, resolve as resolvePath, sep } from 'node:path';
 import { runViaExecutor, type ExecutorSpec } from '@forgex/tools';
 import { ForgeError } from '@forgex/shared';
 import type { SandboxExecResult } from '../types.js';
@@ -108,6 +108,8 @@ export interface BubblewrapPlanInput {
   env?: Record<string, string>;
   allowNetwork?: boolean;
   extraRoBinds?: readonly string[];
+  /** Paths inside workDir that must remain read-only even when the workspace is writable. */
+  protectedPaths?: readonly string[];
 }
 
 export interface BubblewrapPlan {
@@ -252,6 +254,18 @@ export function buildBubblewrapPlan(input: BubblewrapPlanInput): BubblewrapPlan 
   }
 
   args.push('--bind', workDir, workDir, '--chdir', cwd);
+
+  // The workspace bind comes after the system read-only binds, so re-apply protected
+  // workspace mounts after it. Reject paths that could escape the writable root.
+  for (const protectedPath of input.protectedPaths ?? []) {
+    if (!protectedPath || !isAbsolute(protectedPath)) continue;
+    const target = resolvePath(protectedPath);
+    const rel = relative(workDir, target);
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) continue;
+    // Bind only existing host paths; creating a missing bind target can mutate the
+    // host workspace while Bubblewrap prepares its mount namespace.
+    if (existsSync(target)) args.push('--ro-bind-try', target, target);
+  }
 
   for (const [key, value] of Object.entries(input.env ?? {})) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;

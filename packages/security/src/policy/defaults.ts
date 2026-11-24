@@ -9,7 +9,7 @@
  *  - 白名单只降低审批频率，不等于沙箱；文档与 UI 必须如实说明这一点。
  */
 import { resolve } from 'node:path';
-import type { PermissionMode, PolicySettings, RemoteHostConfig } from '@forgex/shared';
+import type { PermissionMode, PolicyDecision, PolicySettings, RemoteHostConfig } from '@forgex/shared';
 
 /**
  * 无条件拒绝的程序（按 basename 匹配，忽略大小写与 .exe 后缀）。
@@ -99,6 +99,7 @@ export interface DefaultPolicyOptions {
   /** 可写根目录，默认等于 workspaceRoots */
   writableRoots?: string[];
   mode?: PermissionMode;
+  toolPolicies?: Record<string, PolicyDecision>;
   protectedPaths?: string[];
   allowedPrograms?: string[];
   deniedPrograms?: string[];
@@ -116,6 +117,7 @@ export function createDefaultPolicySettings(options: DefaultPolicyOptions): Poli
   const roots = options.workspaceRoots.map((root) => resolve(root));
   return {
     mode: options.mode ?? 'standard',
+    ...(options.toolPolicies ? { toolPolicies: { ...options.toolPolicies } } : {}),
     workspaceRoots: roots,
     writableRoots: (options.writableRoots ?? roots).map((root) => resolve(root)),
     protectedPaths: [...(options.protectedPaths ?? DEFAULT_PROTECTED_PATHS)],

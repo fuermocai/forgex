@@ -113,7 +113,7 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
 | --- | --- | --- | --- |
 | 工作区隔离 | `TempDirProvider` / `GitWorktreeProvider` | 只隔离文件视图（新目录 / 独立 worktree）。仍以当前用户权限、正常网络、正常进程表运行 | **不能** |
 | 资源限制 | `ResourceLimiter` + Rust executor | 进程超时、输出限额、`env_clear()`、进程树清理。不降权、无命名空间 | **不能** |
-| OS 级隔离 | `OsSandboxProvider` + bubblewrap（仅 Linux） | mount / pid / net / ipc / uts / user 命名空间；默认断网；根文件系统只读；只有 workDir 可写 | **能**（且是唯一途径） |
+| OS 级隔离 | Linux bubblewrap；macOS Seatbelt；Windows WSL 2 + bubblewrap | Linux 使用 mount / pid / net / ipc / uts / user 命名空间；macOS 由 Seatbelt 限制文件写入与网络；Windows 在 WSL 2 Linux 环境隔离 Linux 命令。默认断网；工作区与临时目录可写、配置的敏感路径只读 | **能**（且是唯一途径） |
 
 `forgex sandbox` 与 `forgex doctor` 会按这三层输出，并直接给出「不可信执行：允许 / 拒绝」。
 
@@ -144,14 +144,21 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
   任一条不满足即拒绝。worktree 有未提交产物时默认拒绝，需显式 `--force`。
 - **不自动删除**：成功、失败、取消、崩溃都保留 worktree 与分支，状态记录里写明产物路径。
 
-### OS 级沙箱（Linux bubblewrap）具体做了什么
+### OS 级沙箱具体做了什么
 
-- **执行链**：`SandboxManager` → `OsSandboxProvider.execUntrusted()` → Rust executor 启动 `bwrap`，目标程序由 bwrap 在沙箱内 exec。不再有"先检查布尔值、再交给普通执行器"的路径。
-- **能力判定**：`isAvailable()` 只有在内核真的能建立命名空间、且**探针**（与业务执行同一套 argv 构建器 + 同一执行器，跑 `/bin/true`）成功返回后才为 `true`。仅检测到 `bwrap` 二进制存在 → `available=false` + 原因。执行器回报的 program 不是 bwrap → 同样判为不可用。
-- **挂载最小化**：`--unshare-all`、`--die-with-parent`、`--clearenv`、`--proc /proc`、`--dev /dev`、`--tmpfs /tmp`；`/usr`、`/usr/local`、`/bin`、`/sbin`、`/lib*` 与少量 `/etc` 文件用 `--ro-bind-try` **只读**挂载；**只有沙箱 workDir 是 `--bind` 可写**，`--chdir` 锁定在其中。
-- **网络**：默认 `--unshare-all` 已包含 `--unshare-net`（无网络）；只有调用方显式 `allowNetwork` 才加 `--share-net`。
-- **生命周期**：`--die-with-parent` + pid namespace，bwrap 退出即整组回收；超时、输出截断、取消由 Rust 执行器施加在 bwrap 进程组上（`kill -KILL -PID`）。
-- **fail closed**：bwrap 缺失、无权限创建命名空间、执行器缺失、`spawnError`、`bwrap:` 前缀的 setup 错误、探针不通过 —— 全部抛 `SANDBOX_UNAVAILABLE` / `SANDBOX_CREATE_FAILED`，**不降级**到临时目录、worktree 或普通进程。
+- **Linux（bubblewrap）**：`--unshare-all`、`--die-with-parent`、`--clearenv`、`--proc /proc`、`--dev /dev`、`--tmpfs /tmp`；系统目录只读挂载，只有沙箱 workDir 可写；默认断网。
+- **macOS（Seatbelt）**：通过 `/usr/bin/sandbox-exec` 应用 deny-default profile；只允许工作区及临时目录写入，配置的敏感路径显式拒绝写入；默认拒绝网络访问。
+- **Windows（WSL 2 + bubblewrap）**：通过 WSL 2 启动 Linux bubblewrap；只把工作区挂为可写，遮蔽其他 `/mnt` Windows 驱动器挂载，敏感路径只读，默认断网。此后端仅支持 Linux 命令，不支持 Windows `.exe`、`.cmd`、`.bat` 或 PowerShell 脚本；目标 WSL 发行版必须安装 bubblewrap 和任务需要的 Linux 工具链。
+- **能力探针**：三个平台都必须用与业务执行相同的沙箱后端成功运行探针；仅找到后端程序不会被报告为可用。Windows 可通过 `FORGEX_WSL_DISTRO` 指定 WSL 发行版，未指定时使用默认发行版。
+
+Windows 首次配置可在 WSL 2 的 Ubuntu 发行版中运行 `sudo apt update && sudo apt install bubblewrap`，然后用 `forgex sandbox` 检查探针结果。若安装了多个发行版，可在启动 ForgeX 前设置 `FORGEX_WSL_DISTRO=Ubuntu`。Agent 要运行的编译器、测试工具和运行时也必须安装在该发行版内。
+
+- **执行链**：`SandboxManager` → `OsSandboxProvider.execUntrusted()` → Rust executor 启动平台入口（Linux bwrap、macOS `sandbox-exec` 或 Windows `wsl.exe` 启动 bwrap），目标程序由沙箱入口启动。不再有"先检查布尔值、再交给普通执行器"的路径。
+- **能力判定**：`isAvailable()` 只有在实际沙箱后端成功运行探针后才为 `true`。仅检测到沙箱程序存在 → `available=false` + 原因。执行器回报的 program 不是预期后端 → 同样判为不可用。
+- **挂载最小化（Linux / WSL）**：`--unshare-all`、`--die-with-parent`、`--clearenv`、`--proc /proc`、`--dev /dev`、`--tmpfs /tmp`；`/usr`、`/usr/local`、`/bin`、`/sbin`、`/lib*` 与少量 `/etc` 文件用 `--ro-bind-try` **只读**挂载；**只有沙箱 workDir 是可写**，`--chdir` 锁定在其中。
+- **网络**：Linux / WSL 默认 `--unshare-all`（无网络）；macOS profile 默认拒绝网络；只有调用方显式 `allowNetwork` 才启用网络。
+- **生命周期**：Linux / WSL 使用 `--die-with-parent` 与 pid namespace；超时、输出截断、取消由 Rust 执行器施加在后端进程组上。
+- **fail closed**：后端缺失、探针失败、沙箱初始化错误或执行器启动错误 —— 全部抛 `SANDBOX_UNAVAILABLE` / `SANDBOX_CREATE_FAILED`，**不降级**到临时目录、worktree 或普通进程。
 
 ### 实测记录（Ubuntu 24.04 + bwrap 0.9.0）
 
@@ -170,21 +177,21 @@ Rust 执行器（`crates/executor`）额外保证：`env_clear()`、独立进程
 | 超时 | `sleep 30` 在 800ms 超时，`timedOut=true`、`code=null` |
 | 进程回收 | kill bwrap 后，沙箱内 `sleep` 立即从宿主进程表消失，无泄漏 |
 
-未在真实主机验证的部分：Rust 执行器自身的超时/截断/进程树清理（本机未编译 `forgex-executor`，该部分由单元测试与 Rust 侧测试覆盖）。
+本表没有单独验证 Rust 执行器自身的超时、截断和进程树清理；这些能力由 Rust 侧实现与对应测试覆盖。
 
 ### 尚未提供（不要当成已有）
 
 - 无 seccomp 系统调用过滤；无 cgroup CPU/内存/IO 配额（资源限制只是超时 + 输出截断）。
 - 不降权到另一个 uid（只有 user namespace 映射）；与宿主共享内核，不防御内核漏洞。
 - 无 GPU / 设备透传，`/dev` 为沙箱内最小 devtmpfs。
-- **Windows / macOS 没有真实实现**：`trustLevel: 'untrusted'` 与 `type: 'os_sandbox'` 一律拒绝，不提供"看起来像沙箱"的替身。
+- **平台边界**：Windows 只在 WSL 2 中隔离 Linux 命令；原生 Windows 命令不支持 `trustLevel: 'untrusted'`。Seatbelt 的系统调用限制与文件访问语义不同于 Linux namespaces，不能视为完全等价。
 - 隔离效果已在真实 Linux + bwrap 上实测（见上表）；但**每个部署环境仍需自行复验**——AppArmor / SELinux 策略、容器内运行、`kernel.unprivileged_userns_clone=0` 都可能让 bwrap 建不起命名空间，此时能力检测会如实报 `available=false` 并拒绝执行。单元测试用可注入执行器只证明路由与 fail-closed 逻辑，不构成隔离证明（`packages/sandbox/test/os-sandbox-linux.integration.test.ts` 是真实集成验证，条件不满足时跳过并打印原因）。
 
 ## 9. 明确的安全限制
 
 1. **命令白名单不是沙箱。** `run_command` 执行的是真实程序，构建脚本、测试框架、`npm install` 钩子都可能执行任意代码。生产环境应只在隔离机器/容器中授予 EXECUTE。
 2. **同用户权限执行（资源限制 ≠ 隔离）。** Rust 执行器不降权，不提供 namespaces/cgroup/seccomp；它只保证"不会失控"，不保证"不能越界"。若需要强隔离，应在容器或独立低权限账户中运行。
-3. **OS 级沙箱只在 Linux 且探针通过时可用。** 其余情况 `trustLevel: 'untrusted'` 被拒绝（fail closed）。能力报告里的 `os_sandbox.available` 是"执行链确实会用已验证的 OS 隔离机制"，不是"机器上装了 bwrap"。
+3. **OS 级沙箱必须通过真实探针。** Linux 使用 bubblewrap，macOS 使用 Seatbelt，Windows 使用 WSL 2 bubblewrap（仅 Linux 命令）；后端缺失或探针失败时 `trustLevel: 'untrusted'` 被拒绝（fail closed）。能力报告里的 `os_sandbox.available` 是"执行链确实会用已验证的 OS 隔离机制"，不是"机器上装了 bwrap"。
 4. **临时目录 / Git Worktree 不是 OS 沙箱。** 它们只做文件系统隔离，进程仍在同一用户权限下运行，网络正常、进程表正常、可执行文件路径正常。报告里 `category` 为 `workspace_isolation`，与 `os_isolation` 分开统计；`anyAvailable` 只看工作区隔离，不代表可跑不可信代码。
 5. **提示注入无法完全消除。** 防线是"即使模型被骗，也无法越权"，而不是"模型永远不会被骗"。
 6. **审计是本地文件。** 未实现远程不可篡改存储与签名；高合规场景应把审计文件转发到集中日志系统。

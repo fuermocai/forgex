@@ -17,7 +17,7 @@ import { createInspectPortTool } from './system/inspect-port.js';
 import { createInspectDiskTool } from './system/inspect-disk.js';
 import { createInspectMemoryTool } from './system/inspect-memory.js';
 import { createReadLogsTool } from './system/read-logs.js';
-import { createRunCommandTool } from './execution/run-command.js';
+import { createRunCommandTool, type RunCommandToolOptions } from './execution/run-command.js';
 import { createSshInspectTool } from './system/ssh-inspect.js';
 import { createCorrelateCodeRuntimeTool } from './system/correlate-code-runtime.js';
 import { createHybridSearchTool } from './search/hybrid-search-tool.js';
@@ -53,6 +53,7 @@ export type { WebQueryToolOptions, GitHubQueryToolOptions } from './web/web-quer
 export { BrowserSessionManager, createBrowserTool } from './browser/index.js';
 export type { BrowserAutomationConfig } from './browser/browser-session.js';
 export type { ProcessSpec, ProcessResult, ProcessLaunch } from './execution/process-runner.js';
+export type { RunCommandToolOptions } from './execution/run-command.js';
 export { runViaExecutor, resolveExecutorBinary } from './execution/executor-client.js';
 export type { ExecutorSpec, ExecutorResult } from './execution/executor-client.js';
 export { createReadFileTool } from './coding/read-file.js';
@@ -109,6 +110,7 @@ export function createBuiltinTools(options?: {
   browserSessionManager?: BrowserSessionManager;
   delegateTask?: DelegateTaskExecutor;
   memoryTools?: MemoryToolService;
+  runCommand?: RunCommandToolOptions;
 }): RegisteredTool[] {
   const hasRemoteHosts = (options?.remoteHosts?.length ?? 0) > 0;
   const languageServers = options?.languageServers ?? [];
@@ -130,7 +132,7 @@ export function createBuiltinTools(options?: {
     createInspectDiskTool(),
     createInspectMemoryTool(),
     createReadLogsTool(),
-    createRunCommandTool(),
+    createRunCommandTool(options?.runCommand),
     // v0.2.0：SSH 远程只读诊断（条件注册）
     ...(hasRemoteHosts ? [createSshInspectTool()] : []),
     // v0.2.0：代码+运行环境关联分析（纯确定性，无条件注册）

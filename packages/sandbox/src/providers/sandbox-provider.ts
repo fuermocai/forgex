@@ -4,7 +4,7 @@
  * 不同的隔离级别有不同的实现：
  *   - TempDirProvider：临时目录隔离（最低级别）
  *   - GitWorktreeProvider：Git Worktree 代码隔离
- *   - OsSandboxProvider：OS 级沙箱（bubblewrap 等，第一版仅检测）
+ *   - OsSandboxProvider：OS 级沙箱（Linux bubblewrap、macOS Seatbelt、Windows WSL 2 bubblewrap）
  *
  * 安全约束：
  *   - create 返回的 Sandbox.workDir 必须在授权工作区内；

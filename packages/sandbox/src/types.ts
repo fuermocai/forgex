@@ -4,7 +4,7 @@
  * 设计原则：
  *   1. 所有字段可 JSON 序列化；
  *   2. **隔离类别必须显式声明**：工作区隔离（temp dir / git worktree）与
- *      OS 级隔离（bubblewrap）是两种完全不同的保证，不允许混为一谈；
+ *      OS 级隔离（平台原生沙箱）是两种完全不同的保证，不允许混为一谈；
  *   3. 能力报告必须同时给出 available + verified + reason，
  *      "检测到二进制" 永远不足以让 os_sandbox 变成 available；
  *   4. 沙箱不可用时拒绝不可信代码执行，禁止自动降级。
@@ -37,7 +37,7 @@ export interface SandboxCapability {
   available: boolean;
   /**
    * 是否经过真实执行验证。
-   * `os_sandbox` 只有在探针确实通过 bwrap 启动过程序后才允许 available=true；
+   * `os_sandbox` 只有在探针确实通过平台沙箱启动过程序后才允许 available=true；
    * 仅检测到二进制存在时 verified=false 且 available=false。
    */
   verified: boolean;
@@ -55,7 +55,7 @@ export interface SandboxCapabilityReport {
   git: SandboxCapability;
   /** 临时目录是否可写（工作区隔离） */
   tempDir: SandboxCapability;
-  /** OS 级沙箱是否可用（bubblewrap，OS 隔离） */
+  /** OS 级沙箱是否可用（平台原生机制，OS 隔离） */
   osSandbox: SandboxCapability;
   /** 是否至少有一种工作区隔离能力可用 */
   anyAvailable: boolean;
@@ -120,7 +120,7 @@ export interface SandboxExecResult {
    */
   isolation?: ExecutionIsolation;
   /** OS 沙箱机制名（仅 isolation='os_sandbox' 时有值） */
-  mechanism?: 'bubblewrap';
+  mechanism?: 'bubblewrap' | 'seatbelt' | 'wsl_bubblewrap';
   /** 实际被启动的可执行文件（审计与溯源自证用） */
   program?: string;
   /** 执行器启动失败原因（例如 bwrap 不存在 / 无权限创建 namespace） */
@@ -140,10 +140,10 @@ export interface SandboxExecSpec {
 /** 经 OS 沙箱执行后的结果（带溯源信息，调用方必须校验后才可使用） */
 export interface OsSandboxedExecResult extends SandboxExecResult {
   isolation: 'os_sandbox';
-  mechanism: 'bubblewrap';
-  /** bwrap 绝对路径 */
+  mechanism: 'bubblewrap' | 'seatbelt' | 'wsl_bubblewrap';
+  /** 沙箱后端可执行文件路径（或 WSL 中的 bwrap 路径） */
   bwrapPath: string;
-  /** 实际启动的程序（必须是 bwrap 本身） */
+  /** 实际启动的沙箱后端或其 Windows/WSL 启动桥接器 */
   program: string;
 }
 

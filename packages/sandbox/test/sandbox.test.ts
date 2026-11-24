@@ -5,7 +5,7 @@
  *   - bwrap 相关用例全部通过**可注入的 lookup + runner** 在单元层面验证，
  *     不依赖本机是否装了 bubblewrap；
  *   - 真实 Linux 集成验证见 `os-sandbox-linux.integration.test.ts`（CI 无 bwrap 时跳过）；
- *   - 无法在 Windows/macOS 上证明真实隔离效果，这里证明的是**路由与 fail-closed 逻辑**。
+ *   - 不依赖目标机上的平台沙箱设施，这里证明的是**路由与 fail-closed 逻辑**。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -121,7 +121,7 @@ describe('CapabilityDetector', () => {
   it('无 OS 沙箱时 untrustedExecution 明确拒绝并给出原因', async () => {
     const runner = new RecordingRunner();
     const provider = new OsSandboxProvider({
-      platform: 'win32',
+      platform: 'freebsd',
       lookupBwrap: () => FOUND_BWRAP,
       runner,
       probeWorkDir: tempWorkspace,
@@ -218,10 +218,10 @@ describe('TempDirProvider', () => {
 /* ------------------------------------------------------------------ */
 
 describe('OsSandboxProvider — 能力判定', () => {
-  it('非 Linux 平台：不可用、不探测、拒绝执行', async () => {
+  it('无平台沙箱实现的平台：不可用、不探测、拒绝执行', async () => {
     const runner = new RecordingRunner();
     const provider = new OsSandboxProvider({
-      platform: 'darwin',
+      platform: 'freebsd',
       lookupBwrap: () => FOUND_BWRAP,
       runner,
       probeWorkDir: tempWorkspace,
@@ -230,7 +230,7 @@ describe('OsSandboxProvider — 能力判定', () => {
     expect(await provider.isAvailable()).toBe(false);
     const status = await provider.status();
     expect(status.mechanism).toBeNull();
-    expect(status.reason).toMatch(/darwin/);
+    expect(status.reason).toMatch(/freebsd/);
 
     await expect(provider.requestUntrustedExecution()).rejects.toMatchObject({
       code: 'SANDBOX_UNAVAILABLE',
@@ -522,7 +522,7 @@ function createManager(provider?: OsSandboxProvider): SandboxManager {
 
 function unavailableProvider(): OsSandboxProvider {
   return new OsSandboxProvider({
-    platform: 'win32',
+    platform: 'freebsd',
     lookupBwrap: () => FOUND_BWRAP,
     runner: new RecordingRunner(),
     probeWorkDir: tempWorkspace,

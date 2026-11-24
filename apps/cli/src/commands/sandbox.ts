@@ -34,8 +34,8 @@ export async function sandboxCommand(args: ParsedArgs, options: { cwd: string })
       '说明：',
       '  - 临时目录 / Git worktree 只隔离文件视图，进程仍以当前用户权限、正常网络运行；',
       '  - Rust 执行器只做超时、输出限额与进程树清理，不是隔离边界；',
-      '  - 只有 OS 级隔离（Linux bubblewrap）可以承载 trustLevel=untrusted；',
-      '    其它平台或未通过探针时一律拒绝，不降级、不静默裸跑。',
+      '  - OS 级隔离由平台后端提供：Linux bubblewrap、macOS Seatbelt、Windows WSL 2 bubblewrap；',
+      '    Windows 沙箱运行 Linux 命令，WSL 或探针不可用时一律拒绝，不降级、不静默裸跑。',
     ].join('\n'),
   );
   stdout.write('\n');

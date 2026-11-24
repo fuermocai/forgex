@@ -10,7 +10,7 @@
  * 安全约束：
  *   - `trustLevel: 'untrusted'` 与 `type: 'os_sandbox'` 一律走
  *     `OsSandboxProvider.execUntrusted()`，**永远不会**落到普通 ResourceLimiter；
- *   - OS 沙箱返回的结果必须带 `isolation: 'os_sandbox'` 且 `program === bwrapPath`，
+ *   - OS 沙箱返回的结果必须带 `isolation: 'os_sandbox'` 且启动入口与平台机制匹配，
  *     否则抛错——防止"检查通过、实际裸跑"；
  *   - 沙箱不可用时拒绝不可信代码执行，禁止自动降级到临时目录 / worktree / 普通进程；
  *   - 不自动关闭 AppArmor 或其他系统安全机制；
@@ -215,7 +215,7 @@ export class SandboxManager {
       },
     );
 
-    // 双保险：provider 必须返回带溯源标记的结果，且确实启动的是 bwrap
+    // 双保险：provider 必须返回带溯源标记的结果，且启动了已验证的平台沙箱入口
     assertOsIsolation(outcome, sandbox);
     return outcome;
   }
@@ -232,10 +232,13 @@ function assertOsIsolation(outcome: OsSandboxedExecResult, sandbox: Sandbox): vo
   if (!outcome || outcome.isolation !== 'os_sandbox') {
     problems.push(`isolation=${String(outcome?.isolation)}`);
   }
-  if (outcome?.mechanism !== 'bubblewrap') {
+  if (!['bubblewrap', 'seatbelt', 'wsl_bubblewrap'].includes(outcome?.mechanism ?? '')) {
     problems.push(`mechanism=${String(outcome?.mechanism)}`);
   }
-  if (!outcome?.bwrapPath || outcome.program !== outcome.bwrapPath) {
+  const launchMatchesBackend = outcome?.mechanism === 'wsl_bubblewrap'
+    ? outcome.program.toLowerCase().endsWith('wsl.exe') && outcome.bwrapPath.startsWith('/')
+    : Boolean(outcome?.bwrapPath) && outcome?.program === outcome?.bwrapPath;
+  if (!launchMatchesBackend) {
     problems.push(`program=${String(outcome?.program)} bwrapPath=${String(outcome?.bwrapPath)}`);
   }
   if (problems.length > 0) {

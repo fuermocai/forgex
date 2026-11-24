@@ -17,7 +17,7 @@ import type { JsonValue, ToolContext, ToolDefinition, ToolOutcome } from '@forge
 import { formatMs, ForgeError } from '@forgex/shared';
 import { CommandGuard } from '@forgex/security';
 import { errorToOutcome, toolError, toolOk } from '../tool-result.js';
-import { runProcess } from '../execution/process-runner.js';
+import { runProcess, type ProcessResult, type ProcessSpec } from '../execution/process-runner.js';
 import { resolveExecutorBinary, runViaExecutor } from '../execution/executor-client.js';
 import { toWorkspaceRelative } from '../coding/fs-utils.js';
 
@@ -31,6 +31,11 @@ interface CommandResult {
   timedOut: boolean;
   aborted: boolean;
   durationMs: number;
+}
+
+export interface RunCommandToolOptions {
+  /** Mandatory isolated execution path used whenever the effective mode is yolo. */
+  executeIsolated?: (spec: ProcessSpec, signal?: AbortSignal) => Promise<ProcessResult>;
 }
 
 const inputSchema = z.object({
@@ -51,7 +56,7 @@ const inputSchema = z.object({
 
 type Input = z.infer<typeof inputSchema>;
 
-export function createRunCommandTool(): ToolDefinition<Input> {
+export function createRunCommandTool(options: RunCommandToolOptions = {}): ToolDefinition<Input> {
   const guard = new CommandGuard();
 
   return {
@@ -59,7 +64,7 @@ export function createRunCommandTool(): ToolDefinition<Input> {
     description:
       '在授权工作区内执行一个外部程序（只接受 program + args 数组，不接受 shell 命令字符串）。' +
       '适用于构建、测试、git 等操作。执行前可能需要人工审批；被策略拒绝时会返回明确原因。' +
-      '注意：该工具不具备沙箱隔离能力，请勿在生产机器上执行不受信任的脚本。',
+      'YOLO 模式要求可用的 OS 沙箱，否则拒绝执行；其他模式不提供 OS 沙箱隔离。',
     parameters: inputSchema as unknown as ToolDefinition<Input>['parameters'],
     riskLevel: 'execute',
     timeoutMs: 300_000,
@@ -82,57 +87,15 @@ export function createRunCommandTool(): ToolDefinition<Input> {
         const timeoutMs = Math.min(input.timeoutMs ?? ctx.policy.commandTimeoutMs, ctx.policy.commandTimeoutMs);
         const maxOutputBytes = 128 * 1024;
 
-        // 优先使用 Rust 执行器（若已部署）；否则使用 Node 兜底实现
-        let executor: 'rust' | 'node' = 'node';
+        let executor: 'rust' | 'node' | 'os_sandbox' = 'node';
         let fallbackReason: string | undefined;
         let result: CommandResult | null = null;
 
-        const rustBinary = resolveExecutorBinary(ctx.workspaceRoot);
-        if (rustBinary) {
-          try {
-            const envSpec: Record<string, string> = {};
-            for (const [key, value] of Object.entries(env)) {
-              if (value !== undefined) envSpec[key] = value;
-            }
-            const rust = await runViaExecutor(
-              rustBinary,
-              {
-                program: input.program,
-                args: input.args,
-                cwd: cwdAbs,
-                env: envSpec,
-                timeoutMs,
-                maxOutputBytes,
-              },
-              ctx.signal,
-            );
-            if (rust.spawnError) {
-              return toolError('TOOL_FAILED', `无法启动程序 ${input.program}: ${rust.spawnError}`, {
-                details: { program: input.program },
-              });
-            }
-            executor = 'rust';
-            result = {
-              code: rust.code,
-              signal: null,
-              stdout: rust.stdout,
-              stderr: rust.stderr,
-              truncated: rust.truncated,
-              timedOut: rust.timedOut,
-              aborted: false,
-              durationMs: rust.durationMs,
-            };
-          } catch (err) {
-            // 取消/超时不能降级重试：命令可能已经产生副作用
-            if (err instanceof ForgeError && (err.code === 'ABORTED' || err.code === 'TOOL_TIMEOUT')) {
-              return errorToOutcome(err);
-            }
-            fallbackReason = err instanceof Error ? err.message : String(err);
+        if (ctx.policy.mode === 'yolo') {
+          if (!options.executeIsolated) {
+            return toolError('SANDBOX_UNAVAILABLE', 'yolo 模式要求 OS 沙箱；当前运行时没有配置隔离执行器，拒绝裸机执行命令');
           }
-        }
-
-        if (!result) {
-          const nodeResult = await runProcess({
+          const isolated = await options.executeIsolated({
             program: input.program,
             args: input.args,
             cwd: cwdAbs,
@@ -140,17 +103,85 @@ export function createRunCommandTool(): ToolDefinition<Input> {
             signal: ctx.signal,
             timeoutMs,
             maxOutputBytes,
-          });
+          }, ctx.signal);
+          executor = 'os_sandbox';
           result = {
-            code: nodeResult.code,
-            signal: nodeResult.signal,
-            stdout: nodeResult.stdout,
-            stderr: nodeResult.stderr,
-            truncated: nodeResult.truncated,
-            timedOut: nodeResult.timedOut,
-            aborted: nodeResult.aborted,
-            durationMs: nodeResult.durationMs,
+            code: isolated.code,
+            signal: isolated.signal,
+            stdout: isolated.stdout,
+            stderr: isolated.stderr,
+            truncated: isolated.truncated,
+            timedOut: isolated.timedOut,
+            aborted: isolated.aborted,
+            durationMs: isolated.durationMs,
           };
+        } else {
+          // 优先使用 Rust 执行器（若已部署）；否则使用 Node 兜底实现
+          const rustBinary = resolveExecutorBinary(ctx.workspaceRoot);
+          if (rustBinary) {
+            try {
+              const envSpec: Record<string, string> = {};
+              for (const [key, value] of Object.entries(env)) {
+                if (value !== undefined) envSpec[key] = value;
+              }
+              const rust = await runViaExecutor(
+                rustBinary,
+                {
+                  program: input.program,
+                  args: input.args,
+                  cwd: cwdAbs,
+                  env: envSpec,
+                  timeoutMs,
+                  maxOutputBytes,
+                },
+                ctx.signal,
+              );
+              if (rust.spawnError) {
+                return toolError('TOOL_FAILED', `无法启动程序 ${input.program}: ${rust.spawnError}`, {
+                  details: { program: input.program },
+                });
+              }
+              executor = 'rust';
+              result = {
+                code: rust.code,
+                signal: null,
+                stdout: rust.stdout,
+                stderr: rust.stderr,
+                truncated: rust.truncated,
+                timedOut: rust.timedOut,
+                aborted: false,
+                durationMs: rust.durationMs,
+              };
+            } catch (err) {
+              // 取消/超时不能降级重试：命令可能已经产生副作用
+              if (err instanceof ForgeError && (err.code === 'ABORTED' || err.code === 'TOOL_TIMEOUT')) {
+                return errorToOutcome(err);
+              }
+              fallbackReason = err instanceof Error ? err.message : String(err);
+            }
+          }
+
+          if (!result) {
+            const nodeResult = await runProcess({
+              program: input.program,
+              args: input.args,
+              cwd: cwdAbs,
+              env,
+              signal: ctx.signal,
+              timeoutMs,
+              maxOutputBytes,
+            });
+            result = {
+              code: nodeResult.code,
+              signal: nodeResult.signal,
+              stdout: nodeResult.stdout,
+              stderr: nodeResult.stderr,
+              truncated: nodeResult.truncated,
+              timedOut: nodeResult.timedOut,
+              aborted: nodeResult.aborted,
+              durationMs: nodeResult.durationMs,
+            };
+          }
         }
 
         const relCwd = toWorkspaceRelative(ctx.workspaceRoot, cwdAbs);

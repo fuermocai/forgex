@@ -12,7 +12,7 @@
  *   - 检测是只读的，不修改系统状态；
  *   - **不把工作区隔离算成 OS 沙箱**：`tempDir` / `git` 的 category 是
  *     `workspace_isolation`，`osSandbox` 才是 `os_isolation`；
- *   - `osSandbox.available` 只在探针真的通过 bwrap 启动过程序时为 true；
+ *   - `osSandbox.available` 只在当前平台的真实沙箱探针成功时为 true；
  *   - 不自动启用 / 关闭任何系统安全机制（如 AppArmor）。
  */
 import { access, mkdtemp, rm } from 'node:fs/promises';
@@ -194,9 +194,8 @@ async function detectTempDir(): Promise<SandboxCapability> {
 /**
  * 检测 OS 级沙箱。
  *
- * 结论完全来自 `OsSandboxProvider.status()`：它会在 Linux 上用真实探针
- * （`bwrap --unshare-all … -- /bin/true`）验证执行链，仅"二进制存在"不会让
- * `available` 变成 true。Windows / macOS 直接不可用并说明原因。
+ * 结论完全来自 `OsSandboxProvider.status()`：平台后端必须实际启动沙箱探针成功，
+ * 仅检测到可执行文件不会让 `available` 变成 true。
  */
 async function detectOsSandbox(provider: OsSandboxProvider): Promise<SandboxCapability> {
   const status = await provider.status();
@@ -234,7 +233,7 @@ export function describeCapabilityReport(report: SandboxCapabilityReport): strin
     `资源限制（超时/输出限额/进程树清理，不是隔离边界）:`,
     `  - Rust 执行器   ${label(report.rustExecutor.available)}${report.rustExecutor.available ? '' : `: ${report.rustExecutor.reason}`}`,
     `OS 级隔离（文件系统/网络/进程，支撑 untrusted 执行）:`,
-    `  - bubblewrap    ${label(report.osSandbox.available)}${report.osSandbox.available ? `（探针已验证，机制 ${report.osSandbox.details?.mechanism ?? 'bubblewrap'}）` : `: ${report.osSandbox.reason}`}`,
+    `  - OS 沙箱       ${label(report.osSandbox.available)}${report.osSandbox.available ? `（探针已验证，机制 ${report.osSandbox.details?.mechanism ?? 'platform-native'}）` : `: ${report.osSandbox.reason}`}`,
     `不可信代码执行: ${report.untrustedExecution.allowed ? '允许（经 OS 沙箱）' : '拒绝（fail closed，不降级）'}`,
   ];
   if (!report.untrustedExecution.allowed && report.untrustedExecution.reason) {

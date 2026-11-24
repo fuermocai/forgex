@@ -153,7 +153,7 @@ export interface ToolDefinition<Input = unknown, Output = JsonValue> {
   /** Zod schema —— 既用于运行时校验，也用于生成 JSON Schema 给模型 */
   readonly parameters: ZodType<Input>;
   readonly riskLevel: RiskLevel;
-  /** Forces a user approval for every call, even in trusted/yolo modes. */
+  /** Requests approval for every call outside yolo mode; hard policy denials still apply in every mode. */
   readonly alwaysRequireApproval?: boolean;
   /** Requires the entire approval preview to be visible before execution is allowed. */
   readonly requireCompleteApprovalPreview?: boolean;
@@ -269,6 +269,8 @@ export interface RunMetrics {
 
 export interface PolicySettings {
   mode: PermissionMode;
+  /** Optional exact tool-name overrides; deny is hard, allow/ask refine the mode default. */
+  toolPolicies?: Record<string, PolicyDecision>;
   /** 授权工作区根目录（绝对路径） */
   workspaceRoots: string[];
   /** 额外允许写入的根目录（默认等于 workspaceRoots） */

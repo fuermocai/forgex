@@ -67,7 +67,7 @@ export class WorkspaceManager {
           details: { type: 'os_sandbox', ...status.details },
         });
       }
-      // 工作目录是 workspaceRoot 内的可写区；隔离来自 bwrap，而不是这个目录
+      // 工作目录是 workspaceRoot 内的可写区；OS 隔离由平台沙箱执行器提供
       const workspace = await this.tempDirProvider.create(spec);
       return { ...workspace, type: 'os_sandbox' };
     }

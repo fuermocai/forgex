@@ -1,19 +1,20 @@
 /**
- * OsSandboxProvider：OS 级沙箱提供者（v0.5.5 真实 bwrap 执行链）。
+ * OsSandboxProvider：按平台选择并验证真实 OS 沙箱执行链。
  *
  * 核心不变式（防止"能力报告"与"实际隔离效果"不一致）：
- *   1. `isAvailable()` 只有在**探针真的通过 bwrap 启动过程序**之后才可能返回 true；
- *      仅检测到 `bwrap` 二进制存在 → 不可用，并给出原因。
+ *   1. `isAvailable()` 只有在真实沙箱探针成功之后才可能返回 true；
+ *      支持 Linux Bubblewrap、macOS Seatbelt 与 Windows WSL 2 Bubblewrap。
  *   2. 不可信代码执行**只能**走 `execUntrusted()`：它返回带
- *      `isolation: 'os_sandbox'` 溯源标记的结果，且实际被启动的 program 必须是 bwrap。
+ *      `isolation: 'os_sandbox'` 溯源标记的结果，且实际被启动的平台入口必须匹配探针。
  *      调用方（SandboxManager）会校验该标记，任何"检查通过但实际裸跑"的路径都会抛错。
  *   3. 任何失败都 fail closed：bwrap 缺失、无权限创建命名空间、执行器缺失、
  *      启动报错、探针不通过 —— 一律抛 SANDBOX_UNAVAILABLE / SANDBOX_CREATE_FAILED，
  *      不降级到临时目录、Git worktree 或普通进程执行。
  *
- * 仅在 Linux 报告该能力可用。Windows / macOS 没有真实实现，明确拒绝。
+ * Windows 通过 WSL 2 隔离执行 Linux 程序；Windows 原生 .exe 不在 WSL 沙箱能力范围内。
  */
 import { existsSync, statSync } from 'node:fs';
+import { isAbsolute, relative as relativePathImpl, resolve as resolvePath, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveExecutorBinary } from '@forgex/tools';
 import { ForgeError } from '@forgex/shared';
@@ -27,6 +28,15 @@ import {
   type BwrapLookup,
   type SandboxRunner,
 } from './bubblewrap.js';
+import { buildSeatbeltProfile, resolveSeatbeltPath } from './seatbelt.js';
+import {
+  buildWslBubblewrapArgs,
+  createWslBubblewrapRunner,
+  findMissingWslPaths,
+  resolveWslBubblewrap,
+  toWslPath,
+  type WslBubblewrapEnvironment,
+} from './wsl-bubblewrap.js';
 
 export interface OsSandboxProviderOptions {
   /** 目标平台（测试注入，默认 process.platform） */
@@ -43,6 +53,8 @@ export interface OsSandboxProviderOptions {
   workspaceRoot?: string;
   callerToken?: string;
   allowedCwdRoots?: readonly string[];
+  /** Workspace-relative paths that remain read-only inside the writable worktree. */
+  protectedPaths?: readonly string[];
   /** 探针使用的已存在可写目录，默认 os.tmpdir() */
   probeWorkDir?: string;
   /** 探针目标程序，默认 /bin/true（或 /usr/bin/true）；测试可注入 */
@@ -54,7 +66,7 @@ export interface OsSandboxProviderOptions {
 export interface OsSandboxStatus {
   available: boolean;
   platform: NodeJS.Platform;
-  mechanism: 'bubblewrap' | null;
+  mechanism: 'bubblewrap' | 'seatbelt' | 'wsl_bubblewrap' | null;
   bwrapPath: string | null;
   /** available=false 时必非空 */
   reason: string;
@@ -88,6 +100,7 @@ export class OsSandboxProvider implements SandboxProvider {
   private readonly executorBinary: string | null | undefined;
   private readonly callerToken?: string;
   private readonly allowedCwdRoots?: readonly string[];
+  private readonly protectedPaths: readonly string[];
   private readonly probeWorkDir: string;
   private readonly probeProgram: string | undefined;
   private readonly probeTimeoutMs: number;
@@ -95,6 +108,7 @@ export class OsSandboxProvider implements SandboxProvider {
   private statusPromise: Promise<OsSandboxStatus> | null = null;
   private cachedStatus: OsSandboxStatus | null = null;
   private runner: SandboxRunner | null = null;
+  private wslEnvironment: WslBubblewrapEnvironment | null = null;
 
   constructor(options: OsSandboxProviderOptions = {}) {
     this.platform = options.platform ?? process.platform;
@@ -105,6 +119,7 @@ export class OsSandboxProvider implements SandboxProvider {
     this.executorBinary = options.executorBinary;
     this.callerToken = options.callerToken;
     this.allowedCwdRoots = options.allowedCwdRoots;
+    this.protectedPaths = options.protectedPaths ?? [];
     this.probeWorkDir = options.probeWorkDir ?? tmpdir();
     this.probeProgram = options.probeProgram;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 5_000;
@@ -124,7 +139,7 @@ export class OsSandboxProvider implements SandboxProvider {
 
   /**
    * OS 沙箱是否可用。
-   * 返回 true 的前提：Linux + bwrap 可执行 + 探针真的通过 bwrap 启动过目标程序。
+   * 返回 true 的前提是当前平台的原生沙箱执行探针成功。
    */
   async isAvailable(): Promise<boolean> {
     return (await this.status()).available;
@@ -144,7 +159,7 @@ export class OsSandboxProvider implements SandboxProvider {
   }
 
   /**
-   * 通过 bwrap 执行不可信代码。
+   * 通过当前平台的 OS 沙箱执行不可信代码。
    *
    * 与 `requestUntrustedExecution()` 的区别：这个方法是**执行**入口，
    * 不存在"先检查再交给别的执行器"的窗口。
@@ -159,6 +174,9 @@ export class OsSandboxProvider implements SandboxProvider {
         details: { platform: this.platform, ...status.details },
       });
     }
+
+    if (this.platform === 'darwin') return this.execWithSeatbelt(spec, options, status.bwrapPath);
+    if (this.platform === 'win32') return this.execWithWslBubblewrap(spec, options);
 
     const workDir = options.workDir;
     if (!existsSync(workDir) || !statSync(workDir).isDirectory()) {
@@ -177,6 +195,7 @@ export class OsSandboxProvider implements SandboxProvider {
       env: spec.env ?? {},
       allowNetwork: options.allowNetwork ?? false,
       extraRoBinds: options.extraRoBinds ?? [],
+      protectedPaths: this.protectedPaths.map((path) => resolvePath(workDir, path)),
     });
 
     const runner = this.getRunner();
@@ -275,9 +294,11 @@ export class OsSandboxProvider implements SandboxProvider {
   private async runProbe(): Promise<OsSandboxStatus> {
     const details: Record<string, string> = { platform: this.platform };
 
+    if (this.platform === 'darwin') return this.probeSeatbelt(details);
+    if (this.platform === 'win32') return this.probeWslBubblewrap(details);
     if (this.platform !== 'linux') {
       const reason =
-        `OS 级沙箱未实现：当前平台 ${this.platform} 没有真实隔离实现（只有 Linux bubblewrap 可用）。` +
+        `OS 级沙箱未实现：当前平台 ${this.platform} 没有已支持的隔离实现。` +
         '不可信代码执行被拒绝，不自动降级到临时目录 / worktree / 普通进程。';
       return {
         available: false,
@@ -343,6 +364,246 @@ export class OsSandboxProvider implements SandboxProvider {
       },
     };
   }
+
+  private async probeSeatbelt(details: Record<string, string>): Promise<OsSandboxStatus> {
+    const seatbeltPath = resolveSeatbeltPath(this.platform);
+    details.mechanism = 'seatbelt';
+    details.sandbox_path = seatbeltPath ?? '(不可用)';
+    if (!seatbeltPath) {
+      return unavailableStatus(this.platform, 'macOS Seatbelt 不可用：未找到可执行的 /usr/bin/sandbox-exec。', details);
+    }
+
+    const result = await this.runWithSeatbelt(
+      { program: '/usr/bin/true', args: [], cwd: this.probeWorkDir },
+      { workDir: this.probeWorkDir, allowNetwork: false, timeoutMs: this.probeTimeoutMs, maxOutputBytes: 16 * 1024 },
+      seatbeltPath,
+      'sandbox-probe',
+    ).catch((error: unknown) => ({
+      code: null,
+      stdout: '',
+      stderr: error instanceof Error ? error.message : String(error),
+      timedOut: false,
+      truncated: false,
+      durationMs: 0,
+      isolation: 'none' as const,
+      mechanism: 'seatbelt' as const,
+      program: '',
+      bwrapPath: '',
+      spawnError: error instanceof Error ? error.message : String(error),
+    }));
+    details.execution_integrated = result.program === seatbeltPath && result.code === 0 ? 'true' : 'false';
+    if (result.program !== seatbeltPath || result.spawnError || result.code !== 0 || result.timedOut) {
+      return unavailableStatus(
+        this.platform,
+        `Seatbelt 探针失败，拒绝在未隔离状态下执行: ${result.stderr || `exit code ${result.code}`}`,
+        details,
+        seatbeltPath,
+      );
+    }
+    return {
+      available: true,
+      platform: this.platform,
+      mechanism: 'seatbelt',
+      bwrapPath: seatbeltPath,
+      reason: '',
+      verified: true,
+      probeDurationMs: result.durationMs,
+      details: { ...details, network: 'disabled', untrusted: 'allowed' },
+    };
+  }
+
+  private async probeWslBubblewrap(details: Record<string, string>): Promise<OsSandboxStatus> {
+    let environment: WslBubblewrapEnvironment;
+    try {
+      environment = await resolveWslBubblewrap(process.env.FORGEX_WSL_DISTRO);
+      this.wslEnvironment = environment;
+      details.wsl_kernel = environment.kernelRelease;
+      details.wsl_distro = environment.distro ?? '(默认发行版)';
+      details.bwrap_path = environment.bubblewrapPath;
+      const workDir = await toWslPath(environment, this.probeWorkDir);
+      const runner = createWslBubblewrapRunner(this.getRunner(), environment, this.workspaceRoot);
+      const args = buildWslBubblewrapArgs({
+        workDir,
+        cwd: workDir,
+        program: '/usr/bin/true',
+        args: [],
+      });
+      const result = await runner.run({
+        program: environment.bubblewrapPath,
+        args,
+        cwd: this.workspaceRoot,
+        env: {},
+        timeoutMs: this.probeTimeoutMs,
+        maxOutputBytes: 16 * 1024,
+        auditTag: 'sandbox-probe',
+      });
+      details.execution_integrated = result.program === environment.wslPath && result.code === 0 ? 'true' : 'false';
+      if (result.program !== environment.wslPath || result.spawnError || result.timedOut || result.code !== 0) {
+        return unavailableStatus(
+          this.platform,
+          `WSL 2 Bubblewrap 探针失败，拒绝在未隔离状态下执行: ${result.stderr || result.spawnError || `exit code ${result.code}`}`,
+          details,
+          environment.bubblewrapPath,
+        );
+      }
+      return {
+        available: true,
+        platform: this.platform,
+        mechanism: 'wsl_bubblewrap',
+        bwrapPath: environment.bubblewrapPath,
+        reason: '',
+        verified: true,
+        probeDurationMs: result.durationMs,
+        details: { ...details, network: 'disabled', untrusted: 'allowed' },
+      };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return unavailableStatus(this.platform, `Windows OS 沙箱不可用: ${reason}`, details);
+    }
+  }
+
+  private async execWithSeatbelt(
+    spec: SandboxExecSpec,
+    options: OsSandboxExecOptions,
+    seatbeltPath: string,
+  ): Promise<OsSandboxedExecResult> {
+    const result = await this.runWithSeatbelt(spec, options, seatbeltPath, 'sandbox-untrusted');
+    if (result.program !== seatbeltPath) {
+      throw new ForgeError('SANDBOX_UNAVAILABLE', '执行链未通过 Seatbelt 启动命令，拒绝视为已隔离');
+    }
+    if (result.spawnError) {
+      throw new ForgeError('SANDBOX_CREATE_FAILED', `sandbox-exec 启动失败: ${result.spawnError}`);
+    }
+    return {
+      code: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+      truncated: result.truncated,
+      durationMs: result.durationMs,
+      isolation: 'os_sandbox',
+      mechanism: 'seatbelt',
+      program: result.program,
+      bwrapPath: seatbeltPath,
+    };
+  }
+
+  private async runWithSeatbelt(
+    spec: SandboxExecSpec,
+    options: OsSandboxExecOptions,
+    seatbeltPath: string,
+    auditTag: string,
+  ): Promise<OsSandboxedExecResult> {
+    const workDir = resolvePath(options.workDir);
+    const cwd = resolvePath(spec.cwd ?? workDir);
+    const relativeCwd = relativePath(workDir, cwd);
+    if (relativeCwd === null) {
+      throw new ForgeError('SANDBOX_UNAVAILABLE', `Seatbelt cwd 不在可写工作区内: ${cwd}`);
+    }
+    const protectedPaths = this.protectedPaths.map((path) => resolvePath(workDir, path));
+    const profile = buildSeatbeltProfile(workDir, protectedPaths, options.allowNetwork ?? false);
+    const started = Date.now();
+    const result = await this.getRunner().run({
+      program: seatbeltPath,
+      args: ['-p', profile, spec.program, ...spec.args],
+      cwd: workDir,
+      env: spec.env ?? {},
+      timeoutMs: options.timeoutMs ?? 30_000,
+      maxOutputBytes: options.maxOutputBytes ?? 256 * 1024,
+      auditTag,
+    }, options.signal);
+    return {
+      code: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+      truncated: result.truncated,
+      durationMs: result.durationMs || Date.now() - started,
+      isolation: 'os_sandbox',
+      mechanism: 'seatbelt',
+      program: result.program,
+      bwrapPath: seatbeltPath,
+      ...(result.spawnError ? { spawnError: result.spawnError } : {}),
+    };
+  }
+
+  private async execWithWslBubblewrap(
+    spec: SandboxExecSpec,
+    options: OsSandboxExecOptions,
+  ): Promise<OsSandboxedExecResult> {
+    const environment = this.wslEnvironment ?? await resolveWslBubblewrap(process.env.FORGEX_WSL_DISTRO);
+    this.wslEnvironment = environment;
+    const workDir = await toWslPath(environment, options.workDir);
+    const cwd = await toWslPath(environment, spec.cwd ?? options.workDir);
+    const protectedPaths = await Promise.all(this.protectedPaths.map(async (path) =>
+      toWslPath(environment, resolvePath(options.workDir, path))));
+    const missingProtectedPaths = await findMissingWslPaths(environment, protectedPaths);
+    const runner = createWslBubblewrapRunner(this.getRunner(), environment, this.workspaceRoot);
+    const args = buildWslBubblewrapArgs({
+      workDir,
+      cwd,
+      program: spec.program,
+      args: spec.args,
+      env: spec.env,
+      protectedPaths: protectedPaths.filter((path) => !missingProtectedPaths.has(path)),
+      allowNetwork: options.allowNetwork,
+    });
+    const result = await runner.run({
+      program: environment.bubblewrapPath,
+      args,
+      cwd: this.workspaceRoot,
+      env: {},
+      timeoutMs: options.timeoutMs ?? 30_000,
+      maxOutputBytes: options.maxOutputBytes ?? 256 * 1024,
+      auditTag: 'sandbox-untrusted',
+    }, options.signal);
+    if (result.program !== environment.wslPath) {
+      throw new ForgeError('SANDBOX_UNAVAILABLE', '执行链未通过 WSL 2 启动 Bubblewrap，拒绝视为已隔离');
+    }
+    if (result.spawnError) {
+      throw new ForgeError('SANDBOX_CREATE_FAILED', `WSL Bubblewrap 启动失败: ${result.spawnError}`);
+    }
+    const bwrapError = detectBwrapSetupError(result.stderr, result.code);
+    if (bwrapError) {
+      throw new ForgeError('SANDBOX_CREATE_FAILED', `WSL Bubblewrap 未能建立沙箱: ${bwrapError}`);
+    }
+    return {
+      code: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+      truncated: result.truncated,
+      durationMs: result.durationMs,
+      isolation: 'os_sandbox',
+      mechanism: 'wsl_bubblewrap',
+      program: result.program,
+      bwrapPath: environment.bubblewrapPath,
+    };
+  }
+}
+
+function relativePath(root: string, target: string): string | null {
+  const rel = relativePathImpl(root, target);
+  return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)
+    ? null
+    : rel;
+}
+
+function unavailableStatus(
+  platform: NodeJS.Platform,
+  reason: string,
+  details: Record<string, string>,
+  bwrapPath: string | null = null,
+): OsSandboxStatus {
+  return {
+    available: false,
+    platform,
+    mechanism: null,
+    bwrapPath,
+    reason,
+    verified: false,
+    details: { ...details, untrusted: 'denied' },
+  };
 }
 
 /**

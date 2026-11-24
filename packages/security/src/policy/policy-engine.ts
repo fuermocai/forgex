@@ -68,11 +68,23 @@ export class PolicyEngine {
     const programHit = this.checkProgram(riskLevel, facts, settings);
     if (programHit) return programHit;
 
+    const toolOverride = settings.toolPolicies?.[input.tool];
+    if (toolOverride === 'deny') {
+      return { decision: 'deny', reason: `工具 ${input.tool} 被项目策略拒绝`, rule: 'tool_policy_deny' };
+    }
+
     const modeDecision = this.evaluateMode(riskLevel, settings);
-    if (modeDecision.decision !== 'allow') return modeDecision;
+    if (modeDecision.decision === 'deny') return modeDecision;
+    if (toolOverride === 'ask') {
+      return { decision: 'ask', reason: `工具 ${input.tool} 按项目策略需要审批`, rule: 'tool_policy_ask' };
+    }
+    if (toolOverride === 'allow' && modeDecision.decision === 'ask') {
+      return { decision: 'allow', reason: `工具 ${input.tool} 按项目策略放行`, rule: 'tool_policy_allow' };
+    }
+    if (modeDecision.decision === 'ask') return modeDecision;
 
     // 允许之后再看白名单：未命中白名单只是需要审批，不是拒绝
-    if (riskLevel === 'execute' && facts?.program && settings.allowedPrograms.length > 0) {
+    if (settings.mode !== 'yolo' && riskLevel === 'execute' && facts?.program && settings.allowedPrograms.length > 0) {
       const base = programBasename(facts.program);
       const allowed = settings.allowedPrograms.some((item) => programBasename(item) === base);
       if (!allowed) {
