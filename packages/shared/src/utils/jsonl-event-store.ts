@@ -12,24 +12,34 @@ export interface JsonlEvent {
   data: Record<string, unknown>;
 }
 
+export interface JsonlEventStoreOptions {
+  /** Avoid creating an empty log during read-only access; append creates it on demand. */
+  createIfMissing?: boolean;
+}
+
 /** Append-only event log shared by all persistent ForgeX subsystems. */
 export class JsonlEventStore {
   private readonly path: string;
   private readonly memoryEvents: JsonlEvent[] | null;
+  private readonly createIfMissing: boolean;
   private cache: JsonlEvent[] | null = null;
   private cacheSize = -1;
 
-  constructor(path: string) {
+  constructor(path: string, options: JsonlEventStoreOptions = {}) {
     this.path = path;
     this.memoryEvents = path === ':memory:' ? [] : null;
+    this.createIfMissing = options.createIfMissing ?? true;
     if (path !== ':memory:') {
-      mkdirSync(dirname(path), { recursive: true });
-      if (!existsSync(path)) closeSync(openSync(path, 'a'));
+      if (this.createIfMissing) {
+        mkdirSync(dirname(path), { recursive: true });
+        if (!existsSync(path)) closeSync(openSync(path, 'a'));
+      }
     }
   }
 
   readAll(): JsonlEvent[] {
     if (this.memoryEvents) return this.memoryEvents.map(cloneEvent);
+    if (!existsSync(this.path)) return [];
     const size = statSync(this.path).size;
     if (this.cache && size === this.cacheSize) return this.cache.map(cloneEvent);
     let text: string;
@@ -63,6 +73,7 @@ export class JsonlEventStore {
     try {
       if (this.memoryEvents) this.memoryEvents.push(event);
       else {
+        mkdirSync(dirname(this.path), { recursive: true });
         appendFileSync(this.path, line, { encoding: 'utf8', flag: 'a' });
         this.cache?.push(event);
         this.cacheSize = statSync(this.path).size;
