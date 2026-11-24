@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { DesktopApi, GitFileEntry, GitStatusResult } from '../../shared/desktop-api.js';
 
@@ -13,6 +13,7 @@ interface Selection {
 
 interface GitPanelProps {
   projectPath: string | null;
+  visible: boolean;
   api: DesktopApi;
 }
 
@@ -78,10 +79,10 @@ function DiffText({ text }: { text: string }) {
   </code></pre>;
 }
 
-export function GitPanel({ projectPath, api }: GitPanelProps) {
+export function GitPanel({ projectPath, visible, api }: GitPanelProps) {
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [statusError, setStatusError] = useState('');
-  const [refreshing, setRefreshing] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [revision, setRevision] = useState(0);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [diff, setDiff] = useState<{ revision: number; path: string; mode: DiffMode; text?: string; error?: string } | null>(null);
@@ -90,9 +91,23 @@ export function GitPanel({ projectPath, api }: GitPanelProps) {
   const [actionError, setActionError] = useState('');
   const [commitId, setCommitId] = useState('');
   const confirmation = useRef<HTMLDialogElement>(null);
+  const wasVisible = useRef(false);
+
+  const refresh = useCallback(() => {
+    setRefreshing(true);
+    setStatusError('');
+    setRevision((current) => current + 1);
+  }, []);
+
+  useLayoutEffect(() => {
+    const becameVisible = visible && !wasVisible.current;
+    wasVisible.current = visible;
+    // A running mutation already refreshes status when it settles.
+    if (becameVisible && !mutating) refresh();
+  }, [visible, mutating, refresh]);
 
   useEffect(() => {
-    if (!projectPath) return;
+    if (!projectPath || revision === 0) return;
     let active = true;
     void api.getGitStatus().then((nextStatus) => {
       if (!active) return;
@@ -138,12 +153,6 @@ export function GitPanel({ projectPath, api }: GitPanelProps) {
   const controlsLocked = refreshing || mutating;
   const stagedCount = groups.staged.length;
   const canCommit = !controlsLocked && stagedCount > 0 && groups.conflicted.length === 0 && message.trim().length > 0;
-
-  const refresh = () => {
-    setRefreshing(true);
-    setStatusError('');
-    setRevision((current) => current + 1);
-  };
 
   const mutate = async (operation: () => Promise<void>) => {
     setMutating(true);
