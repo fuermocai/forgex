@@ -295,37 +295,12 @@ export class SshGuard {
           maxOutputBytes: 64 * 1024,
         };
 
-      case 'read_remote_log': {
-        const grepPart = action.grep
-          ? ` | grep -F -n -- ${escapeShellArg(action.grep)} || true`
-          : '';
-        return {
-          action: 'read_remote_log',
-          shellCommand: withAllowedTarget(action.path, 'file', `tail -n ${action.lines} <&3${grepPart}`),
-          timeoutMs: 20_000,
-          maxOutputBytes: 64 * 1024,
-        };
-      }
-
-      case 'list_dir': {
-        return {
-          action: 'list_dir',
-          shellCommand: withAllowedTarget(action.path, 'directory', action.depth > 1
-            ? `cd -P "$target" && ls -lah --color=never -d . && find -P . -maxdepth ${action.depth - 1} -type f -ls | head -200`
-            : 'cd -P "$target" && ls -lah --color=never -d .'),
-          timeoutMs: 15_000,
-          maxOutputBytes: 48 * 1024,
-        };
-      }
-
-      case 'stat_file': {
-        return {
-          action: 'stat_file',
-          shellCommand: withAllowedTarget(action.path, 'either', 'stat -L -- "$target"'),
-          timeoutMs: 10_000,
-          maxOutputBytes: 16 * 1024,
-        };
-      }
+      case 'read_remote_log':
+        return { action: action.action, shellCommand: pathDiagnosticCommand(action), timeoutMs: 20_000, maxOutputBytes: 64 * 1024 };
+      case 'list_dir':
+        return { action: action.action, shellCommand: pathDiagnosticCommand(action), timeoutMs: 15_000, maxOutputBytes: 48 * 1024 };
+      case 'stat_file':
+        return { action: action.action, shellCommand: pathDiagnosticCommand(action), timeoutMs: 10_000, maxOutputBytes: 16 * 1024 };
 
       case 'kernel_modules': {
         const filterFlag = action.filter ? ` | grep -iF -- ${escapeShellArg(action.filter)}` : '';
@@ -349,25 +324,68 @@ export class SshGuard {
 /* 辅助函数                                                              */
 /* ------------------------------------------------------------------ */
 
-/** Open a descriptor once, check its kernel-resolved location, and use that same object.
- * Linux /proc/self/fd and readlink are required for path-based diagnostics.
+/** Fixed remote program. Open metadata without touching device/FIFO data or requiring read permission.
+ * Each utility operates on the pinned object or the directory selected by fchdir.
  */
-function withAllowedTarget(path: string, kind: 'file' | 'directory' | 'either', command: string): string {
-  const allowed = ALLOWED_LOG_DIRS.flatMap(root => [root.slice(0, -1), root + '*']).join('|');
-  const typeCheck = kind === 'file' ? '[ -f "$target" ]'
-    : kind === 'directory' ? '[ -d "$target" ]' : '{ [ -f "$target" ] || [ -d "$target" ]; }';
-  return [
-    "deny() { printf '%s\\n' 'SSH diagnostic path is unavailable or outside allowed roots' >&2; exit 1; }",
-    'target=' + escapeShellArg(path),
-    typeCheck + ' || deny',
-    'exec 3< "$target" || deny',
-    // Preserve trailing newlines in actual filenames through shell command substitution.
-    'resolved=$(readlink -n -- /proc/self/fd/3 && printf .) || deny',
-    'case "${resolved%.}" in ' + allowed + ') ;; *) deny ;; esac',
-    'target=/proc/self/fd/3',
-    typeCheck + ' || deny',
-    command,
-  ].join('\n');
+const pathDiagnosticProgram = `
+import base64
+import json
+import os
+import stat
+import sys
+
+def inspect_target(request):
+    fd = os.open(request["path"], os.O_PATH | os.O_CLOEXEC)
+    try:
+        ref = "/proc/self/fd/" + str(fd)
+        resolved = os.readlink(ref)
+        roots = ${JSON.stringify(ALLOWED_LOG_DIRS)}
+        if not any(resolved == root[:-1] or resolved.startswith(root) for root in roots):
+            raise ValueError("outside diagnostic roots")
+        mode = os.fstat(fd).st_mode
+        os.set_inheritable(fd, True)
+        action = request["action"]
+        if action == "stat_file":
+            os.execlp("stat", "stat", "-L", "--", ref)
+        if action == "list_dir" and stat.S_ISDIR(mode):
+            os.fchdir(fd)
+            if request["depth"] == 1:
+                os.execlp("ls", "ls", "-lah", "--color=never", "-d", ".")
+            script = 'ls -lah --color=never -d . && find -P . -maxdepth "$1" -type f -ls | head -200'
+            os.execl("/bin/sh", "sh", "-c", script, "sh", str(request["depth"] - 1))
+        if action == "read_remote_log" and stat.S_ISREG(mode):
+            # Opening through this descriptor cannot switch to a different inode.
+            data_fd = os.open(ref, os.O_RDONLY | os.O_NONBLOCK)
+            os.dup2(data_fd, 0)
+            if data_fd != 0:
+                os.close(data_fd)
+            lines = str(request["lines"])
+            if not request.get("grep"):
+                os.execlp("tail", "tail", "-n", lines)
+            script = 'tail -n "$1" | grep -F -n -- "$2"; result=$?; [ "$result" -le 1 ]'
+            os.execl("/bin/sh", "sh", "-c", script, "sh", lines, request["grep"])
+        raise ValueError("unsupported diagnostic target")
+    finally:
+        os.close(fd)
+
+try:
+    inspect_target(json.loads(base64.b64decode(sys.argv[1])))
+except (AttributeError, OSError, ValueError):
+    sys.exit("SSH diagnostic target is unavailable or outside allowed roots")
+`;
+
+const pathProgramArgument = Buffer.from(pathDiagnosticProgram).toString('base64');
+type PathDiagnostic = Extract<z.infer<typeof actionUnion>, { action: 'read_remote_log' | 'list_dir' | 'stat_file' }>;
+
+function pathDiagnosticCommand(action: PathDiagnostic): string {
+  // SSH delivers a command string to the account's login shell. Only this fixed quoted
+  // argument and two shell-neutral base64 words cross it. User input is always data.
+  if (/[\x00-\x1f]/.test(action.path) || (action.action === 'read_remote_log' && action.grep && /[\x00-\x1f]/.test(action.grep))) {
+    throw new ForgeError('SSH_ARG_INVALID', '参数包含非法控制字符');
+  }
+  const payload = Buffer.from(JSON.stringify(action)).toString('base64');
+  const launcher = 'script=$(printf %s "$1" | base64 -d) || exit 1; exec python3 -I -c "$script" "$2"';
+  return `/bin/sh -c '${launcher}' sh ${pathProgramArgument} ${payload}`;
 }
 
 function escapeShellArg(raw: string): string {
