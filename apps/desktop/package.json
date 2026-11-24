@@ -1,0 +1,32 @@
+{
+  "name": "forgex-desktop",
+  "version": "0.6.6",
+  "private": true,
+  "type": "module",
+  "description": "ForgeX desktop coding agent",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "pnpm typecheck && electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "package:win": "pnpm build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "ssh2": "1.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "6.3.0",
+    "electron": "45.3.3",
+    "electron-builder": "26.18.0",
+    "electron-vite": "6.0.0",
+    "typescript": "5.9.2",
+    "vite": "8.3.8"
+  }
+}

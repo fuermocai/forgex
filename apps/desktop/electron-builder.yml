@@ -1,0 +1,22 @@
+appId: dev.forgex.desktop
+productName: ForgeX
+directories:
+  output: release
+files:
+  - out/**/*
+  - package.json
+asar: true
+npmRebuild: false
+electronDist: node_modules/electron/dist
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ForgeX-${version}-win-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

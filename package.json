@@ -1,6 +1,6 @@
 {
   "name": "forgex",
-  "version": "0.6.0",
+  "version": "0.6.6",
   "private": true,
   "type": "module",
   "description": "ForgeX - TUI-first coding & DevOps agent runtime",
@@ -16,6 +16,9 @@
     "pack:npm": "pnpm build:npm && npm pack ./dist-npm",
     "pack:npm:dry": "pnpm build:npm && npm pack ./dist-npm --dry-run",
     "publish:npm": "pnpm build:npm && npm publish ./dist-npm --access public",
+    "desktop:dev": "pnpm --filter forgex-desktop dev",
+    "desktop:build": "pnpm --filter forgex-desktop build",
+    "desktop:package:win": "pnpm --filter forgex-desktop package:win",
     "smoke:npm": "node scripts/install-smoke.mjs",
     "typecheck": "tsc -b tsconfig.build.json",
     "clean": "tsc -b tsconfig.build.json --clean",

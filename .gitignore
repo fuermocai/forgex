@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-npm/
+apps/desktop/out/
+apps/desktop/release/
 coverage/
 *.log
 *.tgz

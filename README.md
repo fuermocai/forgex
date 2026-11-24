@@ -64,6 +64,18 @@ forgex sandbox         # 沙箱能力：工作区隔离 / 资源限制 / OS 级�
 > 启动器记录的是仓库绝对路径；仓库移动位置后重新执行一次安装器即可（加 `-SkipInstall` 更快）。
 > 升级代码后同样执行 `-SkipBuild:$false` 或直接 `pnpm build`，启动器始终指向 `apps/cli/dist/main.js`。
 
+### ForgeX 桌面客户端（预览）
+
+桌面端目前提供 Windows x64 安装包，复用 ForgeX Agent Runtime、项目权限边界和会话存储。需要 Node.js >= 22 与 pnpm >= 9：
+
+```powershell
+pnpm install
+pnpm desktop:dev                 # 本地开发
+pnpm desktop:package:win         # 构建 Windows 安装包
+```
+
+安装包输出到 `apps/desktop/release/`。桌面端仍在预览阶段；CLI 是当前稳定使用方式。
+
 ---
 
 ## 快速开始（开发 / 二次开发）
@@ -304,7 +316,7 @@ Key 的落盘位置在三个平台统一为 `~/.forgex/credentials.json`（权�
 | CLI 主路径 | `apps/cli` + `@forgex/core` | chat/run、会话、工具调用、权限审批、上下文与结果状态 | 可直接使用 |
 | CLI 安全链 | `@forgex/security` + `@forgex/tools` | 工作区边界、命令策略、审批、审计、工具输出限额 | CLI 主路径使用 |
 | 可审阅隔离 | `apps/cli` | `run --worktree` + `task list/diff/clean`：独立 worktree/分支、产物审阅、显式清理 | 可直接使用（仅工作区隔离，非 OS 沙箱） |
-| 沙箱隔离 | `@forgex/sandbox` | 工作区隔离（temp dir / worktree）、资源限制、Linux bwrap OS 沙箱 | 工作区与资源限制可用；OS 沙箱仅 Linux 且探针通过，其余平台拒绝 untrusted |
+| 沙箱隔离 | `@forgex/sandbox` | 工作区隔离（temp dir / worktree）、资源限制、Linux bubblewrap、macOS Seatbelt、Windows WSL 2 bubblewrap | OS 沙箱需平台后端探针通过；Windows 仅支持 WSL 中的 Linux 命令，其余情况拒绝 untrusted |
 | 需求分析 | `@forgex/requirement-engine` | 结构化需求、歧义和验收标准 | 独立模块，未接入 CLI 任务流 |
 | 自主执行 | `@forgex/autonomous` | 预算和步骤执行抽象 | 实验性模块；没有 CLI 生产执行器 |
 | 质量门禁 | `@forgex/quality-gate` | 可注入的测试、静态分析和安全扫描阶段 | 独立抽象；未接入 CLI，需配置实际执行器 |
@@ -324,7 +336,7 @@ Key 的落盘位置在三个平台统一为 `~/.forgex/credentials.json`（权�
 │  · 路径必须在 workspaceRoots 内                              │
 │  · 命令只接受 program + args[]，禁止 shell 字符串            │
 │  · API Key 不进入日志、会话、审计；敏感字段自动脱敏           │
-│  · 隔离分三层：工作区隔离 / 资源限制 / OS 沙箱（仅 Linux）     │
+│  · 隔离分三层：工作区隔离 / 资源限制 / Linux/macOS/WSL OS 沙箱 │
 │  · untrusted 只能走 OS 沙箱；不可用即拒绝，绝不降级裸跑        │
 │  · Agent 输出 → ToolDispatcher → Zod → Policy → Approval    │
 │                                                             │
@@ -468,7 +480,7 @@ pnpm publish:npm
 - `--worktree` 只隔离工作区与改动，**不**限制文件读取范围与网络，也不是 `trustLevel: untrusted` 的实现途径。
   已知边界：仓库必须至少有一次提交；子模块 / sparse-checkout 未覆盖；Windows 下若 `core.autocrlf=true`，
   worktree 内的文件是 CRLF（`git` 的 diff 结论正确，但字节与源文件不同）。
-- OS 级沙箱仅 Linux（bubblewrap）提供，且必须通过真实探针；Windows / macOS 的 `trustLevel: untrusted` 与 `type: os_sandbox` 一律拒绝。详情见 `docs/SECURITY.md` 第 8 节。
+- OS 级沙箱通过平台后端提供：Linux bubblewrap、macOS Seatbelt、Windows WSL 2 bubblewrap；均必须通过真实探针。Windows 后端只执行 WSL 内的 Linux 命令，需要 WSL 2 发行版安装 bubblewrap 和对应 Linux 工具链。详情见 `docs/SECURITY.md` 第 8 节。
 - 未内置树解析（tree-sitter）与向量检索，代码理解以文件 + ripgrep 为主。
 - v0.5 的 ModelRouter 和 EngineeringKnowledgeStore 生产适配器（真实 prompt 模板、JSONL 持久化）将在 v0.5.1 交付。
 
