@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, lstat, realpath, stat } from 'node:fs/promises';
-import { delimiter, isAbsolute, relative, resolve, sep } from 'node:path';
+import { access, lstat, mkdtemp, readlink, realpath, rmdir, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DEFAULT_ENV_ALLOWLIST } from '../../../../packages/security/src/policy/defaults.js';
 import { redactText } from '../../../../packages/shared/src/utils/redact.js';
 import type { GitFileEntry, GitStatusResult } from '../shared/desktop-api.js';
@@ -60,20 +61,30 @@ export class DesktopGitService {
   /** Returns the selected file's index or working tree diff. */
   async diff(root: string, path: string, staged: boolean): Promise<string> {
     const file = toRelativeGitPath(path);
-    await assertFilePath(root, file);
+    await inspectFilePath(root, file);
     const git = await openRepository(root);
     const status = await readStatus(git, root);
     const entry = status.entries.find((candidate) => candidate.path === file);
     const options = ['--no-ext-diff', '--no-color', '--no-textconv'];
     if (!staged && entry?.worktreeStatus === '?') {
-      return git(['diff', '--no-index', ...options, '--', '/dev/null', file], 'diff-found');
+      const kind = await inspectFilePath(root, file);
+      if (kind === 'symlink') {
+        const target = await readlink(resolve(root, file)).catch(() => {
+          throw new Error('无法读取 Git 符号链接');
+        });
+        return `符号链接目标：${JSON.stringify(target)}\n`;
+      }
+      if (kind !== 'file') {
+        throw new Error('未跟踪的 Git 文件已不存在');
+      }
+      return git(['diff', '--no-index', ...options, '--', '/dev/null', `./${file}`], 'diff-found');
     }
 
     const side = staged ? entry?.indexStatus : entry?.worktreeStatus;
     const paths = [file];
     if ((side === 'R' || side === 'C') && entry?.originalPath) {
       const original = toRelativeGitPath(entry.originalPath);
-      await assertFilePath(root, original);
+      await inspectFilePath(root, original);
       paths.push(original);
     }
     return git(['diff', ...options, ...(staged ? ['--cached'] : []), '--', ...literalPathspecs(paths)]);
@@ -96,7 +107,16 @@ export class DesktopGitService {
     }
     return this.mutate(async () => {
       const git = await openRepository(root);
-      await git(['commit', '-m', message]);
+      const hooksPath = await mkdtemp(join(tmpdir(), 'forgex-git-hooks-')).catch(() => {
+        throw new Error('无法创建用于提交的空 Git 钩子目录');
+      });
+      try {
+        await git(['-c', `core.hooksPath=${hooksPath}`, 'commit', '-m', message]);
+      } finally {
+        await rmdir(hooksPath).catch(() => {
+          // A cleanup error must not mask whether Git created the commit.
+        });
+      }
       return { commit: (await git(['rev-parse', 'HEAD'])).trim() };
     });
   }
@@ -108,9 +128,20 @@ export class DesktopGitService {
     const files = paths.map((path) => toRelativeGitPath(path));
     await this.mutate(async () => {
       for (const file of files) {
-        await assertFilePath(root, file);
+        await inspectFilePath(root, file);
       }
       const git = await openRepository(root);
+      const status = await readStatus(git, root);
+      const changedPaths = new Set<string>();
+      for (const entry of status.entries) {
+        changedPaths.add(entry.path);
+        if (entry.originalPath !== undefined) {
+          changedPaths.add(entry.originalPath);
+        }
+      }
+      if (files.some((file) => !changedPaths.has(file))) {
+        throw new Error('Git 文件状态已变更，请刷新后重试');
+      }
       const pathspecs = literalPathspecs(files);
       if (action === 'stage') {
         await git(['add', '--', ...pathspecs]);
@@ -245,7 +276,7 @@ function literalPathspecs(paths: string[]): string[] {
   return paths.map((path) => `:(literal)${path}`);
 }
 
-async function assertFilePath(root: string, path: string): Promise<void> {
+async function inspectFilePath(root: string, path: string): Promise<'file' | 'symlink' | undefined> {
   const segments = path.split('/');
   let target = root;
   for (const [index, segment] of segments.entries()) {
@@ -259,13 +290,17 @@ async function assertFilePath(root: string, path: string): Promise<void> {
       throw new Error('无法访问工作区内指定的 Git 文件');
     });
     if (!info) {
-      return;
+      return undefined;
     }
     if (index === segments.length - 1) {
       // Git stores a terminal symlink as a file without reading its target.
-      if (!info.isFile() && !info.isSymbolicLink()) {
-        throw new Error('指定路径不是工作区内的文件');
+      if (info.isSymbolicLink()) {
+        return 'symlink';
       }
+      if (info.isFile()) {
+        return 'file';
+      }
+      throw new Error('指定路径不是工作区内的文件');
     } else {
       if (!info.isDirectory()) {
         throw new Error('Git 文件路径不能经过符号链接或非目录路径');
@@ -279,6 +314,7 @@ async function assertFilePath(root: string, path: string): Promise<void> {
       }
     }
   }
+  return undefined;
 }
 
 async function readStatus(git: GitCommand, root: string): Promise<GitStatusResult> {
