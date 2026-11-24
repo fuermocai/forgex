@@ -142,15 +142,12 @@ export class DesktopGitService {
       if (files.some((file) => !changedPaths.has(file))) {
         throw new Error('Git 文件状态已变更，请刷新后重试');
       }
+      if (hasFileDirectoryConflict(files, changedPaths)) {
+        throw new Error('所选 Git 路径与其他文件存在文件和目录冲突，无法单独更新暂存状态');
+      }
       const head = action === 'unstage'
         ? (await git(['rev-parse', '--verify', '--quiet', 'HEAD'], 'head-missing')).trim()
         : '';
-      const indexPaths = parseGitPathInventory(await git(['ls-files', '--cached', '-z']));
-      // A literal Git pathspec can also select descendants in the source tree.
-      const headPaths = head ? parseGitPathInventory(await git(['ls-tree', '-rz', '--name-only', head])) : [];
-      if (hasFileDirectoryConflict(files, indexPaths.concat(headPaths, [...changedPaths]))) {
-        throw new Error('所选 Git 路径与其他文件存在文件和目录冲突，无法单独更新暂存状态');
-      }
       const pathspecs = literalPathspecs(files);
       if (action === 'stage') {
         await git(['add', '--', ...pathspecs]);
@@ -285,18 +282,7 @@ function literalPathspecs(paths: string[]): string[] {
   return paths.map((path) => `:(literal)${path}`);
 }
 
-function parseGitPathInventory(output: string): string[] {
-  if (!output) {
-    return [];
-  }
-  const paths = output.split('\0');
-  if (paths.pop() !== '' || paths.some((path) => !path)) {
-    throw new Error('无法解析 Git 文件路径列表');
-  }
-  return paths;
-}
-
-function hasFileDirectoryConflict(files: string[], candidatePaths: string[]): boolean {
+function hasFileDirectoryConflict(files: string[], candidatePaths: ReadonlySet<string>): boolean {
   const selected = new Set(files);
   const selectedParents = new Set<string>();
   for (const file of files) {
