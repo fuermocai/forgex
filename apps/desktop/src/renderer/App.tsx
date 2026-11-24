@@ -5,6 +5,8 @@ import { SessionList } from './components/SessionList.js';
 import { SetupScreen } from './components/SetupScreen.js';
 import { ChatView, type ToolActivity } from './components/ChatView.js';
 import { ApprovalDialog } from './components/ApprovalDialog.js';
+import { AppearancePicker } from './components/AppearancePicker.js';
+import { applyTheme, readSavedTheme, saveTheme, type ThemeId } from './theme.js';
 
 interface ChatMessage extends DesktopMessage {
   id: string;
@@ -31,9 +33,16 @@ export default function App() {
   const [showSetup, setShowSetup] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [themeId, setThemeId] = useState<ThemeId>(() => readSavedTheme());
   const busyRef = useRef(false);
   const navigationLockRef = useRef(false);
   const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation | null>(null);
+
+  const selectTheme = (nextTheme: ThemeId) => {
+    setThemeId(nextTheme);
+    applyTheme(nextTheme);
+    saveTheme(nextTheme);
+  };
 
   const refreshState = useCallback(async () => {
     const [nextState, projects] = await Promise.all([window.forgex.getAppState(), window.forgex.getRecentProjects()]);
@@ -239,6 +248,7 @@ export default function App() {
           {project && <span className="project-path">{project.path}</span>}
         </div>
         <div className="topbar-actions">
+          <AppearancePicker themeId={themeId} onSelect={selectTheme} />
           <button className="settings-button" onClick={() => setShowSetup(true)} title="模型设置">模型设置</button>
           <span className="version">{state ? `v${state.version}` : ''}</span>
         </div>
