@@ -1,11 +1,13 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, lstat, mkdtemp, readlink, realpath, rmdir, stat } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, mkdtemp, open, realpath, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DEFAULT_ENV_ALLOWLIST } from '../../../../packages/security/src/policy/defaults.js';
 import { redactText } from '../../../../packages/shared/src/utils/redact.js';
-import type { GitFileEntry, GitStatusResult } from '../shared/desktop-api.js';
+import type { GitFileEntry, GitSnapshot, GitStatusResult } from '../shared/desktop-api.js';
+import { previewUntrackedFile } from './git-file-preview.js';
 
 const GIT_TIMEOUT_MS = 15_000;
 const GIT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -56,37 +58,38 @@ export class DesktopGitService {
 
   /** Reports branch information and all changed paths. */
   async status(root: string): Promise<GitStatusResult> {
-    const git = await openRepository(root);
-    return readStatus(git, root);
+    return withPrivateIndex(root, false, async (git) => {
+      const head = await readHead(git);
+      const status = await readStatus(git, root);
+      if (status.entries.some((entry) => entry.indexStatus !== ' ' && entry.indexStatus !== '?')
+        && !status.entries.some((entry) => entry.conflicted)) {
+        status.snapshot = { head, tree: (await git(['write-tree'])).trim() };
+      }
+      if (head !== await readHead(git)) throw new Error('Git HEAD 已变更，请刷新后重试');
+      return status;
+    });
   }
 
   /** Returns the selected file's index or working tree diff. */
   async diff(root: string, path: string, staged: boolean): Promise<string> {
     const file = toRelativeGitPath(path);
-    await inspectFilePath(root, file);
     const git = await openRepository(root);
+    await inspectFilePath(root, file, git);
     const status = await readStatus(git, root);
-    const entry = status.entries.find((candidate) => candidate.path === file);
+    const entry = status.entries.find((candidate) => candidate.path === file && (staged
+      ? candidate.indexStatus !== ' ' && candidate.indexStatus !== '?'
+      : candidate.worktreeStatus !== ' '));
+    if (!entry) throw new Error('Git 文件状态已变更，请刷新后重试');
     const options = ['--no-ext-diff', '--no-color', '--no-textconv'];
     if (!staged && entry?.worktreeStatus === '?') {
-      const kind = await inspectFilePath(root, file);
-      if (kind === 'symlink') {
-        const target = await readlink(resolve(root, file)).catch(() => {
-          throw new Error('无法读取 Git 符号链接');
-        });
-        return `符号链接目标：${JSON.stringify(target)}\n`;
-      }
-      if (kind !== 'file') {
-        throw new Error('未跟踪的 Git 文件已不存在');
-      }
-      return git(['diff', '--no-index', ...options, '--', '/dev/null', `./${file}`], 'diff-found');
+      return previewUntrackedFile(root, file);
     }
 
     const side = staged ? entry?.indexStatus : entry?.worktreeStatus;
     const paths = [file];
     if ((side === 'R' || side === 'C') && entry?.originalPath) {
       const original = toRelativeGitPath(entry.originalPath);
-      await inspectFilePath(root, original);
+      await inspectFilePath(root, original, git);
       paths.push(original);
     }
     return git(['diff', ...options, ...(staged ? ['--cached'] : []), '--', ...literalPathspecs(paths)]);
@@ -103,24 +106,29 @@ export class DesktopGitService {
   }
 
   /** Commits the existing index and returns the resulting commit ID. */
-  async commit(root: string, message: string): Promise<{ commit: string }> {
+  async commit(root: string, message: string, snapshot: GitSnapshot): Promise<{ commit: string }> {
     if (!isGitCommitMessage(message)) {
       throw new Error('提交说明不能为空、包含空字符或超出长度限制');
     }
-    return this.mutate(async () => {
-      const git = await openRepository(root);
-      const hooksPath = await mkdtemp(join(tmpdir(), 'forgex-git-hooks-')).catch(() => {
-        throw new Error('无法创建用于提交的空 Git 钩子目录');
-      });
-      try {
-        await git(['-c', `core.hooksPath=${hooksPath}`, 'commit', '-m', message]);
-      } finally {
-        await rmdir(hooksPath).catch(() => {
-          // A cleanup error must not mask whether Git created the commit.
-        });
+    return this.mutate(() => withPrivateIndex(root, false, async (git) => {
+      const { head, tree } = snapshot;
+      if (head !== await readHead(git) || tree !== (await git(['write-tree'])).trim()) {
+        throw new Error('暂存内容或 HEAD 已变更，请刷新并重新确认');
       }
-      return { commit: (await git(['rev-parse', 'HEAD'])).trim() };
-    });
+      const parentTree = head ? (await git(['rev-parse', `${head}^{tree}`])).trim()
+        : createHash(tree.length === 64 ? 'sha256' : 'sha1').update('tree 0\0').digest('hex');
+      if (tree === parentTree) throw new Error('没有可提交的暂存内容');
+      for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']) {
+        if (await lstat(await gitPath(git, marker)).catch(ignoreMissing)) {
+          throw new Error('请先在 Git 中完成正在进行的仓库操作');
+        }
+      }
+      // commit-tree never consults the live index. update-ref compares the parent
+      // under Git's ref lock, including the all-zero precondition for an unborn HEAD.
+      const commit = (await git(['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', message])).trim();
+      await git(['update-ref', '-m', `commit: ${message.split('\n')[0]}`, 'HEAD', commit, head || '0'.repeat(tree.length)]);
+      return { commit };
+    }));
   }
 
   private async updateIndex(root: string, paths: string[], action: 'stage' | 'unstage'): Promise<void> {
@@ -128,11 +136,10 @@ export class DesktopGitService {
       throw new Error('Git 文件列表为空、格式无效或超出长度限制');
     }
     const files = paths.map((path) => toRelativeGitPath(path));
-    await this.mutate(async () => {
+    await this.mutate(() => withPrivateIndex(root, true, async (git) => {
       for (const file of files) {
-        await inspectFilePath(root, file);
+        await inspectFilePath(root, file, git);
       }
-      const git = await openRepository(root);
       const status = await readStatus(git, root);
       const changedPaths = new Set<string>();
       for (const entry of status.entries) {
@@ -152,6 +159,8 @@ export class DesktopGitService {
         : '';
       const pathspecs = literalPathspecs(files);
       await checkIndexAndTreePaths(git, files, head);
+      const otherEntries = ['ls-files', '--stage', '-v', '-z', '--', ...files.map((file) => `:(top,exclude,literal)${file}`)];
+      const before = await git(otherEntries, 'index-digest');
       if (action === 'stage') {
         await git(['add', '--', ...pathspecs]);
       } else if (head) {
@@ -161,7 +170,9 @@ export class DesktopGitService {
         // their staged content differs from the current working tree files.
         await git(['rm', '--cached', '--force', '--', ...pathspecs]);
       }
-    });
+      if (before !== await git(otherEntries, 'index-digest')) throw new Error(FILE_DIRECTORY_CONFLICT);
+      await checkIndexAndTreePaths(git, files, head);
+    }));
   }
 
   private async mutate<Result>(operation: () => Promise<Result>): Promise<Result> {
@@ -177,9 +188,57 @@ export class DesktopGitService {
   }
 }
 
-type ExpectedGitExit = 'diff-found' | 'head-missing';
-type GitCommandMode = ExpectedGitExit | 'path-query';
-type GitCommand = (args: string[], mode?: GitCommandMode) => Promise<string>;
+type GitCommandMode = 'head-missing' | 'path-query' | 'index-digest';
+type GitCommand = (args: string[], mode?: GitCommandMode, indexPath?: string) => Promise<string>;
+
+function ignoreMissing(error: unknown): undefined {
+  if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+  throw error;
+}
+
+async function readHead(git: GitCommand): Promise<string> {
+  return (await git(['rev-parse', '--verify', '--quiet', 'HEAD'], 'head-missing')).trim();
+}
+
+async function gitPath(git: GitCommand, name: string): Promise<string> {
+  const path = (await git(['rev-parse', '--path-format=absolute', '--git-path', name])).replace(/\r?\n$/, '');
+  if (!isAbsolute(path)) throw new Error('无法定位 Git 元数据');
+  return path;
+}
+
+/** Operates on one private index snapshot. Writers hold Git's real index lock
+ * until their verified index is atomically installed. Readers copy an inode
+ * published by Git's normal lock-and-rename protocol.
+ */
+async function withPrivateIndex<T>(root: string, publish: boolean, operation: (git: GitCommand) => Promise<T>): Promise<T> {
+  const repo = await openRepository(root);
+  const index = await gitPath(repo, 'index');
+  const directory = await mkdtemp(join(tmpdir(), 'forgex-git-'));
+  const work = join(directory, 'index');
+  const hooks = join(directory, 'hooks');
+  const lock = `${index}.lock`;
+  let locked = false;
+  try {
+    await mkdir(hooks);
+    if (publish) {
+      const handle = await open(lock, 'wx').catch(() => { throw new Error('Git 索引已锁定或不可写，请稍后重试'); });
+      locked = true;
+      await handle.close();
+    }
+    await copyFile(index, work).catch(ignoreMissing);
+    const git: GitCommand = (args, mode) => repo(['-c', `core.hooksPath=${hooks}`, ...args], mode, work);
+    const result = await operation(git);
+    if (publish) {
+      await copyFile(work, lock);
+      await rename(lock, index);
+      locked = false;
+    }
+    return result;
+  } finally {
+    if (locked) await rm(lock, { force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 async function openRepository(root: string): Promise<GitCommand> {
   const canonicalRoot = await realpath(root).catch(() => {
@@ -189,7 +248,7 @@ async function openRepository(root: string): Promise<GitCommand> {
     throw new Error('当前项目的 Git 工作区路径已变更');
   }
   const executable = await findGitExecutable();
-  const git: GitCommand = (args, mode) => runGit(executable, root, args, mode);
+  const git: GitCommand = (args, mode, index) => runGit(executable, root, args, mode, index);
   const output = await git(['rev-parse', '--show-toplevel']);
   const topLevel = output.replace(IS_WINDOWS ? /\r?\n$/ : /\n$/, '');
   if (!isAbsolute(topLevel)) {
@@ -226,7 +285,7 @@ async function findGitExecutable(): Promise<string> {
   throw new Error('找不到 Git 可执行程序，请安装 Git 并将其加入 PATH');
 }
 
-function runGit(executable: string, cwd: string, args: string[], mode?: GitCommandMode): Promise<string> {
+function runGit(executable: string, cwd: string, args: string[], mode?: GitCommandMode, index?: string): Promise<string> {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     const name = key.toUpperCase();
@@ -240,21 +299,28 @@ function runGit(executable: string, cwd: string, args: string[], mode?: GitComma
   env.GIT_TERMINAL_PROMPT = '0';
   env.GIT_OPTIONAL_LOCKS = '0';
   env.GIT_NO_LAZY_FETCH = '1';
+  if (index) env.GIT_INDEX_FILE = index;
 
+  const options = { cwd, env, shell: false, windowsHide: true, timeout: GIT_TIMEOUT_MS };
+  const argv = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args];
+  // Hash raw NUL records in bounded memory, including non-UTF-8 names.
+  if (mode === 'index-digest') return new Promise((fulfill, reject) => {
+    const hash = createHash('sha256');
+    const child = spawn(executable, argv, { ...options, stdio: ['ignore', 'pipe', 'ignore'] });
+    child.stdout.on('data', (data: Buffer) => hash.update(data));
+    child.on('error', () => reject(new Error('无法验证 Git 索引')));
+    child.on('close', (code) => {
+      if (code === 0) fulfill(hash.digest('hex'));
+      else reject(new Error('无法验证 Git 索引'));
+    });
+  });
   return new Promise((fulfill, reject) => {
-    execFile(executable, ['-c', 'core.fsmonitor=false', ...args], {
-      cwd,
-      env,
-      shell: false,
-      windowsHide: true,
-      timeout: GIT_TIMEOUT_MS,
+    execFile(executable, argv, {
+      ...options,
       maxBuffer: mode === 'path-query' ? GIT_PATH_QUERY_BYTES : GIT_MAX_OUTPUT_BYTES,
       encoding: 'utf8',
     }, (error, stdout, stderr) => {
-      const expectedFailure = error?.code === 1 && (
-        (mode === 'diff-found' && stdout.length > 0)
-        || (mode === 'head-missing' && stdout.length === 0 && stderr.length === 0)
-      );
+      const expectedFailure = error?.code === 1 && mode === 'head-missing' && stdout.length === 0 && stderr.length === 0;
       if (!error || expectedFailure) {
         fulfill(stdout);
         return;
@@ -367,7 +433,7 @@ function* parentGitPaths(path: string): Iterable<string> {
   }
 }
 
-async function inspectFilePath(root: string, path: string): Promise<'file' | 'symlink' | undefined> {
+async function inspectFilePath(root: string, path: string, git: GitCommand): Promise<'file' | 'symlink' | 'gitlink' | undefined> {
   const segments = path.split('/');
   let target = root;
   for (const [index, segment] of segments.entries()) {
@@ -390,6 +456,10 @@ async function inspectFilePath(root: string, path: string): Promise<'file' | 'sy
       }
       if (info.isFile()) {
         return 'file';
+      }
+      if (info.isDirectory()) {
+        const entries = await readGitPathRecords(git, ['ls-files', '--stage', '-z', '--', ...literalPathspecs([path])]);
+        if (entries.length === 1 && entries[0].startsWith('160000 ') && entries[0].slice(entries[0].indexOf('\t') + 1) === path) return 'gitlink';
       }
       throw new Error('指定路径不是工作区内的文件');
     } else {

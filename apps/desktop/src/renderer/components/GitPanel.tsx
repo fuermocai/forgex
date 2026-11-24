@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import type { DesktopApi, GitFileEntry, GitStatusResult } from '../../shared/desktop-api.js';
+import type { DesktopApi, GitFileEntry, GitSnapshot, GitStatusResult } from '../../shared/desktop-api.js';
 
 type DiffMode = 'staged' | 'unstaged';
 type FileGroup = DiffMode | 'untracked' | 'conflicted';
@@ -14,6 +14,7 @@ interface Selection {
 interface GitPanelProps {
   projectPath: string | null;
   visible: boolean;
+  suspended: boolean;
   api: DesktopApi;
 }
 
@@ -79,7 +80,7 @@ function DiffText({ text }: { text: string }) {
   </code></pre>;
 }
 
-export function GitPanel({ projectPath, visible, api }: GitPanelProps) {
+export function GitPanel({ projectPath, visible, suspended, api }: GitPanelProps) {
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [statusError, setStatusError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -91,7 +92,11 @@ export function GitPanel({ projectPath, visible, api }: GitPanelProps) {
   const [actionError, setActionError] = useState('');
   const [commitId, setCommitId] = useState('');
   const confirmation = useRef<HTMLDialogElement>(null);
+  const [pending, setPending] = useState<{ snapshot: GitSnapshot; message: string; count: number } | null>(null);
   const wasVisible = useRef(false);
+  useLayoutEffect(() => {
+    if (suspended || !visible) confirmation.current?.close();
+  }, [suspended, visible]);
 
   const refresh = useCallback(() => {
     setRefreshing(true);
@@ -152,7 +157,8 @@ export function GitPanel({ projectPath, visible, api }: GitPanelProps) {
   const currentDiff = !refreshing && diff?.revision === revision && diff.path === selectedPath && diff.mode === mode ? diff : null;
   const controlsLocked = refreshing || mutating;
   const stagedCount = groups.staged.length;
-  const canCommit = !controlsLocked && stagedCount > 0 && groups.conflicted.length === 0 && message.trim().length > 0;
+  const canCommit = !suspended && !controlsLocked && status?.snapshot && stagedCount > 0
+    && groups.conflicted.length === 0 && message.trim().length > 0;
 
   const mutate = async (operation: () => Promise<void>) => {
     setMutating(true);
@@ -170,14 +176,16 @@ export function GitPanel({ projectPath, visible, api }: GitPanelProps) {
 
   const openConfirmation = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (canCommit) confirmation.current?.showModal();
+    if (!canCommit || !status?.snapshot) return;
+    setPending({ snapshot: status.snapshot, message: message.trim(), count: stagedCount });
+    confirmation.current?.showModal();
   };
 
   const commit = () => {
     confirmation.current?.close();
-    if (!canCommit) return;
+    if (!canCommit || !pending) return;
     void mutate(async () => {
-      const result = await api.commitGit({ message: message.trim() });
+      const result = await api.commitGit({ message: pending.message, snapshot: pending.snapshot });
       setMessage('');
       setCommitId(result.commit);
     });
@@ -260,17 +268,18 @@ export function GitPanel({ projectPath, visible, api }: GitPanelProps) {
           </section>
         </div>
         <form className="git-commit" onSubmit={openConfirmation}>
+          <small>ForgeX 暂存、取消暂存及提交时均跳过仓库 Git 钩子。</small>
           <label htmlFor="git-commit-message">提交说明 <span>（{stagedCount} 个已暂存文件）</span></label>
           <div className="git-commit-input">
             <textarea id="git-commit-message" rows={2} maxLength={4096} value={message} disabled={mutating} onChange={(event) => setMessage(event.target.value)} />
             <button className="send-button" type="submit" disabled={!canCommit}>提交…</button>
           </div>
         </form>
-        <dialog ref={confirmation} className="git-confirmation" aria-labelledby="git-confirmation-title" aria-describedby="git-confirmation-description">
-          <h2 id="git-confirmation-title">提交 {stagedCount} 个已暂存文件？</h2>
+        <dialog ref={confirmation} onClose={() => setPending(null)} className="git-confirmation" aria-labelledby="git-confirmation-title" aria-describedby="git-confirmation-description">
+          <h2 id="git-confirmation-title">提交 {pending?.count} 个已暂存文件？</h2>
           <div id="git-confirmation-description">
             <p>ForgeX 将跳过仓库的 Git 钩子。本次提交只包含已暂存的内容。</p>
-            <pre>{message.trim()}</pre>
+            <pre>{pending?.message}</pre>
           </div>
           <div className="setup-actions">
             <button type="button" className="secondary-button" onClick={() => confirmation.current?.close()}>取消</button>

@@ -97,8 +97,15 @@ export interface GitFileEntry {
   conflicted: boolean;
 }
 
+/** Immutable tree and its expected parent. An empty head denotes an unborn branch. */
+export interface GitSnapshot {
+  head: string;
+  tree: string;
+}
+
 /** Status for the active local repository and its upstream comparison. */
 export interface GitStatusResult {
+  snapshot?: GitSnapshot;
   root: string;
   branch: string;
   ahead: number;
@@ -173,7 +180,7 @@ export interface DesktopApi {
   getGitDiff(input: { path: string; staged: boolean }): Promise<string>;
   stageGitFiles(paths: string[]): Promise<void>;
   unstageGitFiles(paths: string[]): Promise<void>;
-  commitGit(input: { message: string }): Promise<{ commit: string }>;
+  commitGit(input: { message: string; snapshot: GitSnapshot }): Promise<{ commit: string }>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 

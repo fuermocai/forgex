@@ -294,7 +294,7 @@ export default function App() {
           </div>
           <div className="workspace-view" hidden={gitVisible}>{mainContent}</div>
           {project && !starting && <div className="workspace-view" hidden={!gitVisible}>
-            <GitPanel key={project.path} projectPath={project.path} visible={gitVisible} api={window.forgex} />
+            <GitPanel key={project.path} projectPath={project.path} visible={gitVisible} suspended={approval !== null} api={window.forgex} />
           </div>}
           {gitVisible && starting && <p className="git-feedback" role="status">正在打开项目…</p>}
         </section>

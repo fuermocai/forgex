@@ -14,6 +14,7 @@
  *   因此 read_remote_log / list_dir / stat_file 的路径校验拆到
  *   `validateActionPathRefine` 里，Guard.validate 串行调用。
  */
+import { isIPv6 } from 'node:net';
 import { z } from 'zod';
 import { ForgeError } from '@forgex/shared';
 import type {
@@ -123,7 +124,7 @@ function isAllowedPath(raw: string): boolean {
 /* ------------------------------------------------------------------ */
 
 const hostConfigSchema = z.object({
-  host: z.string().min(1).max(253).regex(/^[a-zA-Z0-9._:-]+$/),
+  host: z.string().min(1).max(253).refine((host) => /^[a-zA-Z0-9._:-]+$/.test(host) || isIPv6(host)),
   port: z.number().int().min(1).max(65535).default(22),
   username: z.string().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/),
   privateKeyPath: z.string().min(1).max(4096),
@@ -343,9 +344,7 @@ import stat
 import sys
 
 def has_prerequisites(request):
-    tools = {"stat_file": ["stat"], "list_dir": ["ls"], "read_remote_log": ["tail"]}[request["action"]]
-    if request.get("depth", 1) > 1:
-        tools.extend(["find", "head"])
+    tools = {"stat_file": ["stat"], "list_dir": ["find", "head"], "read_remote_log": ["tail"]}[request["action"]]
     if request.get("grep"):
         tools.append("grep")
     if any(shutil.which(tool) is None for tool in tools):
@@ -374,10 +373,8 @@ def inspect_target(request):
             os.execlp("stat", "stat", "-L", "--", ref)
         if action == "list_dir" and stat.S_ISDIR(mode):
             os.fchdir(fd)
-            if request["depth"] == 1:
-                os.execlp("ls", "ls", "-lah", "--color=never", "-d", ".")
-            script = 'ls -lah --color=never -d . && find -P . -maxdepth "$1" -type f -ls | head -200'
-            os.execl("/bin/sh", "sh", "-c", script, "sh", str(request["depth"] - 1))
+            script = 'find -P . -mindepth 1 -maxdepth "$1" -ls | head -200'
+            os.execl("/bin/sh", "sh", "-c", script, "sh", str(request["depth"]))
         if action == "read_remote_log" and stat.S_ISREG(mode):
             # Opening through this descriptor cannot switch to a different inode.
             data_fd = os.open(ref, os.O_RDONLY | os.O_NONBLOCK)

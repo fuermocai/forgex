@@ -15,7 +15,7 @@ import {
   testConnectivity,
 } from '../../../cli/src/runtime/connect-core.js';
 import { redactText } from '../../../../packages/shared/src/utils/redact.js';
-import type { ConnectModelInput, ConnectModelResult, DesktopAppState, DesktopEvent, GitStatusResult, SessionSummary } from '../shared/desktop-api.js';
+import type { ConnectModelInput, ConnectModelResult, DesktopAppState, DesktopEvent, GitSnapshot, GitStatusResult, SessionSummary } from '../shared/desktop-api.js';
 import { DesktopApprovalBroker } from './desktop-approval-broker.js';
 import { DesktopGitService } from './desktop-git-service.js';
 import { RecentProjectStore } from './recent-project-store.js';
@@ -316,8 +316,8 @@ export class DesktopRuntime {
     await this.git.unstage(await this.requireGitWorkspaceRoot(), paths);
   }
 
-  async commitGit(input: { message: string }): Promise<{ commit: string }> {
-    return this.git.commit(await this.requireGitWorkspaceRoot(), input.message);
+  async commitGit(input: { message: string; snapshot: GitSnapshot }): Promise<{ commit: string }> {
+    return this.git.commit(await this.requireGitWorkspaceRoot(), input.message, input.snapshot);
   }
 
   async close(): Promise<void> {

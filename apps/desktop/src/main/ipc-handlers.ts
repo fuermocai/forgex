@@ -157,7 +157,13 @@ export function registerShellIpcHandlers(owner: BrowserWindow, runtime: DesktopR
     if (!isRecord(input) || !isGitCommitMessage(input.message)) {
       throw new Error('提交说明不能为空、包含空字符或超出长度限制');
     }
-    return runtime.commitGit({ message: input.message });
+    const snapshot = input.snapshot;
+    const oid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+    if (!isRecord(snapshot) || typeof snapshot.tree !== 'string' || !oid.test(snapshot.tree)
+      || typeof snapshot.head !== 'string' || (snapshot.head !== '' && !oid.test(snapshot.head))) {
+      throw new Error('提交快照无效，请刷新后重试');
+    }
+    return runtime.commitGit({ message: input.message, snapshot: { head: snapshot.head, tree: snapshot.tree } });
   };
 
   const sshHandlers = new Map<string, (input: unknown) => unknown>([
