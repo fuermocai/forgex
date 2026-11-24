@@ -14,6 +14,7 @@
  *   因此 read_remote_log / list_dir / stat_file 的路径校验拆到
  *   `validateActionPathRefine` 里，Guard.validate 串行调用。
  */
+import { isIPv6 } from 'node:net';
 import { z } from 'zod';
 import { ForgeError } from '@forgex/shared';
 import type {
@@ -107,6 +108,7 @@ const ALLOWED_LOG_DIRS = ['/var/log/', '/tmp/', '/home/'];
 
 function isAllowedPath(raw: string): boolean {
   const normalized = raw.replace(/\\/g, '/');
+  if (normalized.split('/').includes('..')) return false;
   if (!normalized.startsWith('/')) return false;
   for (const prefix of ALLOWED_LOG_DIRS) {
     if (normalized.startsWith(prefix)) return true;
@@ -122,7 +124,7 @@ function isAllowedPath(raw: string): boolean {
 /* ------------------------------------------------------------------ */
 
 const hostConfigSchema = z.object({
-  host: z.string().min(1).max(253).regex(/^[a-zA-Z0-9._:-]+$/),
+  host: z.string().min(1).max(253).refine((host) => /^[a-zA-Z0-9._:-]+$/.test(host) || isIPv6(host)),
   port: z.number().int().min(1).max(65535).default(22),
   username: z.string().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/),
   privateKeyPath: z.string().min(1).max(4096),
@@ -145,6 +147,16 @@ export interface GuardedSpec {
   host: SshHostConfig;
   action: z.infer<typeof actionUnion>;
   command: SshCommand;
+}
+
+/** Parse the desktop IPC action without accepting caller-supplied command fields. */
+export function parseRemoteDiagAction(raw: unknown) {
+  const parsed = actionUnion.safeParse(raw);
+  if (!parsed.success || !raw || typeof raw !== 'object'
+    || Object.keys(raw).some((key) => !Object.hasOwn(parsed.data, key))) {
+    throw new ForgeError('SSH_ACTION_INVALID', '诊断动作或参数无效');
+  }
+  return parsed.data;
 }
 
 export class SshGuard {
@@ -284,41 +296,12 @@ export class SshGuard {
           maxOutputBytes: 64 * 1024,
         };
 
-      case 'read_remote_log': {
-        const safePath = escapeShellArg(action.path);
-        const grepPart = action.grep
-          ? ` | grep -F -n -- ${escapeShellArg(action.grep)} || true`
-          : '';
-        return {
-          action: 'read_remote_log',
-          shellCommand: `tail -n ${action.lines} ${safePath}${grepPart}`,
-          timeoutMs: 20_000,
-          maxOutputBytes: 64 * 1024,
-        };
-      }
-
-      case 'list_dir': {
-        const safePath = escapeShellArg(action.path);
-        return {
-          action: 'list_dir',
-          shellCommand:
-            action.depth > 1
-              ? `ls -lah --color=never -d ${safePath} && find ${safePath} -maxdepth ${action.depth - 1} -type f -ls 2>/dev/null | head -200`
-              : `ls -lah --color=never -d ${safePath}`,
-          timeoutMs: 15_000,
-          maxOutputBytes: 48 * 1024,
-        };
-      }
-
-      case 'stat_file': {
-        const safePath = escapeShellArg(action.path);
-        return {
-          action: 'stat_file',
-          shellCommand: `stat ${safePath} 2>/dev/null || stat -f %N:%s:%p -x ${safePath} 2>/dev/null || echo 'stat not available'`,
-          timeoutMs: 10_000,
-          maxOutputBytes: 16 * 1024,
-        };
-      }
+      case 'read_remote_log':
+        return { action: action.action, shellCommand: pathDiagnosticCommand(action), timeoutMs: 20_000, maxOutputBytes: 64 * 1024 };
+      case 'list_dir':
+        return { action: action.action, shellCommand: pathDiagnosticCommand(action), timeoutMs: 15_000, maxOutputBytes: 48 * 1024 };
+      case 'stat_file':
+        return { action: action.action, shellCommand: pathDiagnosticCommand(action), timeoutMs: 10_000, maxOutputBytes: 16 * 1024 };
 
       case 'kernel_modules': {
         const filterFlag = action.filter ? ` | grep -iF -- ${escapeShellArg(action.filter)}` : '';
@@ -341,6 +324,117 @@ export class SshGuard {
 /* ------------------------------------------------------------------ */
 /* 辅助函数                                                              */
 /* ------------------------------------------------------------------ */
+
+/** EX_UNAVAILABLE is reserved for a missing remote path-diagnostic prerequisite. */
+export const SSH_PATH_UNAVAILABLE_EXIT = 69;
+export const SSH_PATH_REQUIREMENTS = '远端主机不支持此路径诊断。需要 Linux O_PATH、/proc/self/fd、/bin/sh、Python 3.4 或更高版本、base64 -d 和相应的诊断命令。';
+
+// ASCII keeps the preflight usable on hosts with a C locale.
+const remoteRequirements = 'Unsupported SSH path diagnostic: requires Linux O_PATH, /proc/self/fd, /bin/sh, Python 3.4 or later, base64 -d and the diagnostic utilities.';
+
+/** Fixed remote program. Open metadata without touching device/FIFO data or requiring read permission.
+ * Each utility operates on the pinned object or the directory selected by fchdir.
+ */
+const pathDiagnosticProgram = `
+import base64
+import json
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+
+def has_prerequisites(request):
+    tools = {"stat_file": ["stat"], "list_dir": ["find", "head"], "read_remote_log": ["tail"]}[request["action"]]
+    if request.get("grep"):
+        tools.append("grep")
+    if any(shutil.which(tool) is None for tool in tools):
+        return False
+    try:
+        fd = os.open("/", os.O_PATH | os.O_CLOEXEC)
+        try:
+            return os.readlink("/proc/self/fd/" + str(fd)) == "/"
+        finally:
+            os.close(fd)
+    except (AttributeError, OSError):
+        return False
+
+def list_directory(depth):
+    # head bounds traversal by closing the pipe at the limit. Preserve any
+    # diagnostic find emitted before that intentional SIGPIPE.
+    with subprocess.Popen(["head", "-n", "200"], stdin=subprocess.PIPE) as limiter:
+        with subprocess.Popen(["find", "-P", ".", "-mindepth", "1", "-maxdepth", str(depth), "-ls"],
+                              stdout=limiter.stdin, stderr=subprocess.PIPE) as listing:
+            limiter.stdin.close()
+            had_error = False
+            for chunk in iter(lambda: listing.stderr.read(4096), b""):
+                sys.stderr.buffer.write(chunk)
+                had_error = True
+            status = listing.wait()
+        if limiter.wait() != 0 or had_error or status not in (0, -signal.SIGPIPE):
+            sys.exit(1)
+
+def inspect_target(request):
+    fd = os.open(request["path"], os.O_PATH | os.O_CLOEXEC)
+    try:
+        ref = "/proc/self/fd/" + str(fd)
+        resolved = os.readlink(ref)
+        roots = ${JSON.stringify(ALLOWED_LOG_DIRS)}
+        if not any(resolved == root[:-1] or resolved.startswith(root) for root in roots):
+            raise ValueError("outside diagnostic roots")
+        mode = os.fstat(fd).st_mode
+        os.set_inheritable(fd, True)
+        action = request["action"]
+        if action == "stat_file":
+            os.execlp("stat", "stat", "-L", "--", ref)
+        if action == "list_dir" and stat.S_ISDIR(mode):
+            os.fchdir(fd)
+            list_directory(request["depth"])
+            return
+        if action == "read_remote_log" and stat.S_ISREG(mode):
+            # Opening through this descriptor cannot switch to a different inode.
+            data_fd = os.open(ref, os.O_RDONLY | os.O_NONBLOCK)
+            os.dup2(data_fd, 0)
+            if data_fd != 0:
+                os.close(data_fd)
+            lines = str(request["lines"])
+            if not request.get("grep"):
+                os.execlp("tail", "tail", "-n", lines)
+            script = 'tail -n "$1" | grep -F -n -- "$2"; result=$?; [ "$result" -le 1 ]'
+            os.execl("/bin/sh", "sh", "-c", script, "sh", lines, request["grep"])
+        raise ValueError("unsupported diagnostic target")
+    finally:
+        os.close(fd)
+
+try:
+    request = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
+    if not has_prerequisites(request):
+        print(${JSON.stringify(remoteRequirements)}, file=sys.stderr)
+        sys.exit(${SSH_PATH_UNAVAILABLE_EXIT})
+    inspect_target(request)
+except (AttributeError, OSError, ValueError):
+    sys.exit("SSH diagnostic target is unavailable or outside allowed roots")
+`;
+
+const pathProgramArgument = Buffer.from(pathDiagnosticProgram).toString('base64');
+type PathDiagnostic = Extract<z.infer<typeof actionUnion>, { action: 'read_remote_log' | 'list_dir' | 'stat_file' }>;
+
+function pathDiagnosticCommand(action: PathDiagnostic): string {
+  // SSH delivers a command string to the account's login shell. Only this fixed quoted
+  // argument and two shell-neutral base64 words cross it. User input is always data.
+  if (/[\x00-\x1f]/.test(action.path) || (action.action === 'read_remote_log' && action.grep && /[\x00-\x1f]/.test(action.grep))) {
+    throw new ForgeError('SSH_ARG_INVALID', '参数包含非法控制字符');
+  }
+  const payload = Buffer.from(JSON.stringify(action)).toString('base64');
+  const launcher = [
+    `unavailable() { echo "${remoteRequirements}" >&2; exit ${SSH_PATH_UNAVAILABLE_EXIT}; }`,
+    'python3 -I -c "import sys; sys.exit(sys.version_info < (3, 4) or not sys.flags.isolated)" >/dev/null 2>&1 || unavailable',
+    'script=$(printf %s "$1" | base64 -d 2>/dev/null) || unavailable',
+    'exec python3 -I -c "$script" "$2"',
+  ].join('; ');
+  return `/bin/sh -c '${launcher}' sh ${pathProgramArgument} ${payload}`;
+}
 
 function escapeShellArg(raw: string): string {
   if (/[\x00-\x1f]/.test(raw)) throw new ForgeError('SSH_ARG_INVALID', '参数包含非法控制字符');

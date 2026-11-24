@@ -4,6 +4,8 @@ import { ProjectPicker } from './components/ProjectPicker.js';
 import { SessionList } from './components/SessionList.js';
 import { SetupScreen } from './components/SetupScreen.js';
 import { ChatView, type ToolActivity } from './components/ChatView.js';
+import { GitPanel } from './components/GitPanel.js';
+import { SshHostPanel } from './components/SshHostPanel.js';
 import { ApprovalDialog } from './components/ApprovalDialog.js';
 import { AppearancePicker } from './components/AppearancePicker.js';
 import { applyTheme, readSavedTheme, saveTheme, type ThemeId } from './theme.js';
@@ -31,6 +33,10 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [starting, setStarting] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
+  const [showSshHosts, setShowSshHosts] = useState(false);
+  const [sshMismatches, setSshMismatches] = useState<ReadonlySet<string>>(() => new Set());
+  const sshLauncherRef = useRef<HTMLButtonElement>(null);
+  const [workspaceView, setWorkspaceView] = useState<'chat' | 'git'>('chat');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [themeId, setThemeId] = useState<ThemeId>(() => readSavedTheme());
@@ -224,7 +230,9 @@ export default function App() {
     setNotice('模型已连接');
   };
 
-  const mainContent = showSetup || (state && !state.modelConfigured)
+  const setupVisible = showSetup || state?.modelConfigured === false;
+  const gitVisible = workspaceView === 'git' && project !== null;
+  const mainContent = setupVisible
     ? <SetupScreen state={state} onConnected={() => void onModelConnected()} onCancel={() => setShowSetup(false)} />
     : session
       ? <ChatView key={session.id} messages={messages} streamingText={streamingText} tools={tools} busy={busy} error={error} notice={notice} onSend={(text) => void sendMessage(text)} onCancel={() => void window.forgex.cancelTurn()} />
@@ -249,7 +257,11 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <AppearancePicker themeId={themeId} onSelect={selectTheme} />
-          <button className="settings-button" onClick={() => setShowSetup(true)} title="模型设置">模型设置</button>
+          <button className="settings-button" type="button" aria-haspopup="dialog" ref={sshLauncherRef} onClick={() => setShowSshHosts(true)}>SSH 主机</button>
+          <button className="settings-button" onClick={() => {
+            setWorkspaceView('chat');
+            setShowSetup(true);
+          }} title="模型设置">模型设置</button>
           <span className="version">{state ? `v${state.version}` : ''}</span>
         </div>
       </header>
@@ -274,9 +286,25 @@ export default function App() {
             <span className="mode-label">{state?.permissionMode ?? 'standard'}</span>
           </div>
         </aside>
-        <section className="main-panel">{mainContent}</section>
+        <section className="main-panel">
+          <div className="workspace-switch" role="group" aria-label="工作区视图">
+            <button type="button" aria-pressed={!gitVisible} onClick={() => setWorkspaceView('chat')}>对话</button>
+            <button type="button" aria-pressed={gitVisible} onClick={() => setWorkspaceView('git')} disabled={!project || starting}>Git</button>
+            {!project && <span>选择本地项目后可使用 Git</span>}
+          </div>
+          <div className="workspace-view" hidden={gitVisible}>{mainContent}</div>
+          {project && !starting && <div className="workspace-view" hidden={!gitVisible}>
+            <GitPanel key={project.path} projectPath={project.path} visible={gitVisible} suspended={approval !== null} api={window.forgex} />
+          </div>}
+          {gitVisible && starting && <p className="git-feedback" role="status">正在打开项目…</p>}
+        </section>
       </div>
-          {approval && <ApprovalDialog key={approval.id} request={approval} queueLength={approvalQueue.length} onResolve={(decision) => void resolveApproval(decision)} />}
+      {showSshHosts && <SshHostPanel api={window.forgex} suspended={approval !== null} mismatches={sshMismatches}
+        setMismatches={setSshMismatches} onClose={() => {
+          setShowSshHosts(false);
+          sshLauncherRef.current?.focus();
+        }} />}
+      {approval && <ApprovalDialog key={approval.id} request={approval} queueLength={approvalQueue.length} onResolve={(decision) => void resolveApproval(decision)} />}
       {pendingNavigation && <div className="modal-backdrop navigation-backdrop">
         <section className="navigation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="navigation-title">
           <div className="dialog-context">{busy ? '任务仍在运行' : '切换目标'}</div>

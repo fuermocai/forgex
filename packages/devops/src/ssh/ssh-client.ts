@@ -1,230 +1,177 @@
-/**
- * SSH 远程执行客户端（ssh2 协议实现）。
- *
- * 安全边界：
- *   - 本类只负责"连接并执行 Guard 产出的命令"，不做任何安全判定；
- *   - Host Key 指纹必须匹配（SHA256: 前缀严格比对）；
- *   - 连接/命令双重超时；stdout/stderr 分别限流；
- *   - AbortSignal 可在任何阶段中断；
- *   - 私钥路径不在本层校验——Guard 已在 validateHost 里做过，这里假设已解析到安全路径。
- */
-import { readFileSync } from 'node:fs';
-import { Client } from 'ssh2';
-import type { Channel, ConnectConfig, ExecOptions } from 'ssh2';
-import { ForgeError, byteLength, type JsonValue } from '@forgex/shared';
-import type { GuardedSpec, SshCommand } from './ssh-guard.js';
-import type { SshExecuteResult, SshExecSpec } from './types.js';
+import { constants } from 'node:fs';
+import { open } from 'node:fs/promises';
+import ssh2, { type Client, type ConnectConfig } from 'ssh2';
+import { ForgeError, type JsonValue } from '@forgex/shared';
+import type { GuardedSpec } from './ssh-guard.js';
+import type { SshExecuteResult, SshExecSpec, SshHostConfig } from './types.js';
 
-/** 默认连接超时 */
-const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
-/** 默认命令超时 */
-const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
-/** 默认输出上限（ssh-guard 层已强制截断这里再兜底） */
-const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
+const CONNECT_TIMEOUT_MS = 10_000;
+type Endpoint = Pick<SshHostConfig, 'host' | 'port' | 'username'>;
 
-export class SshClient {
-  /**
-   * 执行一条 Guard 校验后的 SSH 规格。
-   * Guard 必须先被调用，本类不绕过 Guard。
-   */
-  async execute(spec: SshExecSpec, guard: GuardedSpec, signal?: AbortSignal): Promise<SshExecuteResult> {
-    const { host, command } = guard;
-    const connectTimeoutMs = spec.options?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-    const commandTimeoutMs = Math.min(command.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS);
-    const maxOutputBytes = Math.min(command.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
-
-    const client = new Client();
-    const started = Date.now();
-
-    let aborted = false;
-    let hostKeyMismatch = false;
-    let connectionError: string | undefined;
-    let execChannel: Channel | null = null;
-    let cmdTimer: NodeJS.Timeout | null = null;
-
-    const teardown = (): void => {
-      if (cmdTimer) { clearTimeout(cmdTimer); cmdTimer = null; }
-      try { execChannel?.close(); } catch { /* noop */ }
-      try { client.end(); } catch { /* noop */ }
-      try { client.destroy(); } catch { /* noop */ }
-    };
-
-    const onAbort = (): void => {
-      aborted = true;
-      teardown();
-    };
-    if (signal) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener('abort', onAbort, { once: true });
-    }
-
-    const privateKeyData = readFileSync(host.privateKeyPath);
-
-    // Host Key 校验：Guard 已强制 hostKeyFingerprint 必填
-    // ssh2 用 SyncHostFingerprintVerifier 自动计算指纹后传给我们比对
-    const expectedFingerprint = host.hostKeyFingerprint!;
-
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const finish = (err?: unknown): void => {
-        if (settled) return;
-        settled = true;
-        if (err) reject(err); else resolve();
-      };
-
-      const connectTimeout = setTimeout(() => {
-        finish(new ForgeError('SSH_CONNECTION_FAILED', `连接 ${host.host}:${host.port ?? 22} 超时`));
-      }, connectTimeoutMs);
-
-      client
-        .on('ready', () => {
-          clearTimeout(connectTimeout);
-          finish();
-        })
-        .on('error', (err: Error & { code?: string }) => {
-          clearTimeout(connectTimeout);
-          if (signal?.aborted) {
-            finish(new ForgeError('ABORTED', 'SSH 连接被取消'));
-            return;
-          }
-          if (hostKeyMismatch) {
-            finish(new ForgeError('SSH_HOSTKEY_MISMATCH', connectionError ?? 'Host Key 指纹不匹配'));
-            return;
-          }
-          connectionError = err.message;
-          finish(new ForgeError('SSH_CONNECTION_FAILED', `SSH 连接失败: ${err.message}`));
-        })
-        .connect({
-          host: host.host,
-          port: host.port ?? 22,
-          username: host.username,
-          privateKey: privateKeyData,
-          readyTimeout: connectTimeoutMs,
-          // ssh2 会自动计算 SHA256 指纹并传给 SyncHostFingerprintVerifier
-          hostHash: 'sha256',
-          hostVerifier: (fingerprint: string): boolean => {
-            if (fingerprint !== expectedFingerprint) {
-              hostKeyMismatch = true;
-              connectionError = `Host Key 指纹不匹配: 期望 ${expectedFingerprint}, 实际 ${fingerprint}`;
-              return false;
-            }
-            return true;
-          },
-        } satisfies ConnectConfig);
-    });
-
-    if (aborted) {
-      teardown();
-      return this.abortedResult(command, spec, started, 'SSH 连接被取消');
-    }
-
-    // 命令执行
-    let stdout = '';
-    let stderr = '';
-    let truncated = false;
-    let timedOut = false;
-    let exitCode: number | null = null;
-
+async function readPrivateKey(path: string, signal: AbortSignal): Promise<Buffer> {
+  let data: Buffer | undefined;
+  try {
+    signal.throwIfAborted();
+    const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
     try {
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        const finish = (err?: unknown): void => {
-          if (settled) return;
-          settled = true;
-          if (err) reject(err); else resolve();
-        };
-
-        const execOpts: ExecOptions = {};
-        client.exec(command.shellCommand, execOpts, (err, channel) => {
-          if (err) {
-            finish(new ForgeError('SSH_EXEC_FAILED', `远程命令启动失败: ${err.message}`));
-            return;
-          }
-          execChannel = channel;
-
-          cmdTimer = setTimeout(() => {
-            timedOut = true;
-            channel.close();
-          }, commandTimeoutMs);
-
-          channel
-            .on('close', (code: number | null) => {
-              if (cmdTimer) { clearTimeout(cmdTimer); cmdTimer = null; }
-              exitCode = code;
-              finish();
-            })
-            .on('data', (data: Buffer) => {
-              const chunk = data.toString('utf8');
-              if (byteLength(stdout) < maxOutputBytes) {
-                stdout += chunk;
-                if (byteLength(stdout) >= maxOutputBytes) truncated = true;
-              } else {
-                truncated = true;
-              }
-            })
-            .stderr
-            .on('data', (data: Buffer) => {
-              const chunk = data.toString('utf8');
-              const stderrLimit = Math.floor(maxOutputBytes * 0.5);
-              if (byteLength(stderr) < stderrLimit) {
-                stderr += chunk;
-                if (byteLength(stderr) >= stderrLimit) truncated = true;
-              } else {
-                truncated = true;
-              }
-            });
-        });
-      });
-    } catch (err) {
-      teardown();
-      if (signal?.aborted) {
-        return this.abortedResult(command, spec, started, '远程命令已取消');
+      signal.throwIfAborted();
+      const info = await file.stat();
+      signal.throwIfAborted();
+      if (!info.isFile() || info.size < 1 || info.size > 1024 * 1024) throw new Error();
+      data = Buffer.alloc(info.size);
+      let offset = 0;
+      while (offset < data.length) {
+        const { bytesRead } = await file.read(data, offset, data.length - offset, null);
+        signal.throwIfAborted();
+        if (!bytesRead) throw new Error();
+        offset += bytesRead;
       }
-      if (err instanceof ForgeError) throw err;
-      throw new ForgeError('SSH_EXEC_FAILED', err instanceof Error ? err.message : String(err));
+    } finally {
+      await file.close();
     }
-
-    teardown();
-
-    const input = spec.action as unknown as Record<string, unknown>;
-    return {
-      exitCode,
-      stdout: truncated ? truncateWithNote(stdout, maxOutputBytes, 0.9) : stdout,
-      stderr: truncated ? truncateWithNote(stderr, Math.floor(maxOutputBytes * 0.5), 0.9) : stderr,
-      truncated,
-      timedOut,
-      durationMs: Date.now() - started,
-      action: command.action,
-      input: input as unknown as JsonValue,
-    };
-  }
-
-  private abortedResult(command: SshCommand, spec: SshExecSpec, started: number, reason: string): SshExecuteResult {
-    return {
-      exitCode: null,
-      stdout: '',
-      stderr: '',
-      truncated: false,
-      timedOut: false,
-      durationMs: Date.now() - started,
-      action: command.action,
-      input: (spec.action as unknown as Record<string, unknown>) as unknown as JsonValue,
-      connectionError: reason,
-    };
+    signal.throwIfAborted();
+    return data;
+  } catch {
+    data?.fill(0);
+    signal.throwIfAborted();
+    throw new ForgeError('SSH_AUTH_FAILED', '无法读取私钥，请检查文件路径和读取权限');
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* 辅助函数                                                              */
-/* ------------------------------------------------------------------ */
+/** Own the transport until the caller finishes, including failures before ready. */
+async function withClient<T>(signal: AbortSignal | undefined, start: (
+  client: Client, resolve: (value: T) => void, reject: (error: Error) => void,
+) => void): Promise<T> {
+  const client = new ssh2.Client();
+  let abort: (() => void) | undefined;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      abort = () => reject(new ForgeError('ABORTED', 'SSH 操作已取消'));
+      if (signal?.aborted) { abort(); return; }
+      signal?.addEventListener('abort', abort, { once: true });
+      client.on('error', (error: Error & { level?: string }) => {
+        if (error.level === 'client-timeout') reject(new ForgeError('TOOL_TIMEOUT', 'SSH 连接超时'));
+        else if (error.level === 'client-authentication') reject(new ForgeError('SSH_AUTH_FAILED', 'SSH 私钥认证失败'));
+        else reject(new ForgeError('SSH_CONNECTION_FAILED', 'SSH 连接失败，请检查主机、端口和网络'));
+      });
+      client.once('close', () => reject(new ForgeError('SSH_CONNECTION_FAILED', 'SSH 连接已关闭')));
+      start(client, resolve, reject);
+    });
+  } finally {
+    if (abort) signal?.removeEventListener('abort', abort);
+    client.destroy();
+  }
+}
 
-/**
- * SSH Host Key 指纹现在由 ssh2 的 SyncHostFingerprintVerifier 自动计算
- * 并直接传给 hostVerifier 回调，不需要我们自己实现。
- */
+function fingerprintOf(hex: string): string {
+  if (!/^[a-f0-9]{64}$/.test(hex)) throw new ForgeError('SSH_HOSTKEY_MISMATCH', '无效的服务器主机指纹');
+  return 'SHA256:' + Buffer.from(hex, 'hex').toString('base64').replace(/=+$/, '');
+}
 
-function truncateWithNote(text: string, limitBytes: number, keepRatio: number): string {
-  const maxChars = Math.max(64, Math.floor(limitBytes * keepRatio));
-  if (Buffer.byteLength(text, 'utf8') <= limitBytes) return text;
-  return text.slice(0, maxChars) + '\n...[truncated]';
+function endpointConfig(host: Endpoint, timeout = CONNECT_TIMEOUT_MS): ConnectConfig {
+  return { host: host.host, port: host.port ?? 22, username: host.username, readyTimeout: timeout, hostHash: 'sha256' };
+}
+
+async function authenticate(
+  client: Client, host: SshHostConfig, reject: (err: Error) => void, signal?: AbortSignal, timeout = CONNECT_TIMEOUT_MS,
+): Promise<void> {
+  if (!host.hostKeyFingerprint) throw new ForgeError('SSH_HOSTKEY_MISSING', '请先核对并信任主机指纹');
+  const deadline = AbortSignal.timeout(timeout);
+  const readSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  // A kernel open/read may outlive cancellation. Release the caller immediately;
+  // readPrivateKey disposes the eventual descriptor/buffer before control can reach connect().
+  const onTimeout = () => reject(new ForgeError('TOOL_TIMEOUT', '读取私钥超时'));
+  deadline.addEventListener('abort', onTimeout, { once: true });
+  let privateKey: Buffer | undefined;
+  try {
+    privateKey = await readPrivateKey(host.privateKeyPath, readSignal);
+    readSignal.throwIfAborted();
+    client.connect({
+      ...endpointConfig(host, timeout),
+      privateKey,
+      authHandler: ['publickey'],
+      hostVerifier: (hex: string) => {
+        // Retain compatibility with existing configurations using ssh2's hex digest.
+        if (host.hostKeyFingerprint === fingerprintOf(hex) || host.hostKeyFingerprint === hex) return true;
+        reject(new ForgeError('SSH_HOSTKEY_MISMATCH', '主机指纹不匹配，已阻止连接。请重新核对指纹'));
+        return false;
+      },
+    });
+  } catch (err) {
+    if (err instanceof ForgeError) throw err;
+    readSignal.throwIfAborted();
+    throw new ForgeError('SSH_AUTH_FAILED', '私钥无效或已加密，请选择可读取的无口令私钥');
+  } finally {
+    deadline.removeEventListener('abort', onTimeout);
+    privateKey?.fill(0);
+  }
+}
+
+export class SshClient {
+  probeHostKey(host: Endpoint, signal: AbortSignal): Promise<string> {
+    return withClient<string>(signal, (client, resolve) => {
+      client.connect({ ...endpointConfig(host), authHandler: [], hostVerifier: (hex: string) => {
+        resolve(fingerprintOf(hex));
+        // Reject the handshake before ssh2 can start user authentication.
+        return false;
+      } });
+    });
+  }
+
+  testConnection(host: SshHostConfig, signal: AbortSignal): Promise<void> {
+    return withClient<void>(signal, (client, resolve, reject) => {
+      client.once('ready', resolve);
+      void authenticate(client, host, reject, signal).catch(reject);
+    });
+  }
+
+  async execute(spec: SshExecSpec, guard: GuardedSpec, signal?: AbortSignal): Promise<SshExecuteResult> {
+    const { host, command } = guard;
+    const started = Date.now();
+    const limit = Math.min(command.maxOutputBytes, 256 * 1024);
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let truncated = false;
+    let timedOut = false;
+    let exitCode: number | null = null;
+    let timer: NodeJS.Timeout | undefined;
+    let connectionError: string | undefined;
+    try {
+      exitCode = await withClient<number | null>(signal, (client, resolve, reject) => {
+        client.once('ready', () => {
+          timer = setTimeout(() => { timedOut = true; resolve(null); }, Math.min(command.timeoutMs, 30_000));
+          client.exec(command.shellCommand, (err, channel) => {
+            if (err) { reject(new ForgeError('SSH_EXEC_FAILED', '无法启动远程诊断')); return; }
+            channel.on('error', () => reject(new ForgeError('SSH_EXEC_FAILED', '远程诊断通道失败')));
+            channel.once('close', (code: number | undefined) => resolve(code ?? null));
+            channel.on('data', (chunk: Buffer) => {
+              const data = chunk.subarray(0, limit - stdoutBytes);
+              if (data.length) stdout.push(data);
+              stdoutBytes += data.length;
+              if (data.length < chunk.length) truncated = true;
+            });
+            channel.stderr.on('data', (chunk: Buffer) => {
+              const data = chunk.subarray(0, Math.floor(limit / 2) - stderrBytes);
+              if (data.length) stderr.push(data);
+              stderrBytes += data.length;
+              if (data.length < chunk.length) truncated = true;
+            });
+          });
+        });
+        void authenticate(client, host, reject, signal, spec.options?.connectTimeoutMs).catch(reject);
+      });
+    } catch (err) {
+      if (!signal?.aborted) throw err;
+      connectionError = 'SSH 操作已取消';
+    } finally {
+      clearTimeout(timer);
+    }
+    return {
+      exitCode, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString(),
+      truncated, timedOut, durationMs: Date.now() - started, action: command.action,
+      input: spec.action as unknown as JsonValue, ...(connectionError ? { connectionError } : {}),
+    };
+  }
 }

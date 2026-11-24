@@ -4,6 +4,14 @@ import { ipcRenderer } from 'electron';
 import { IPC_CHANNELS, type DesktopApi, type DesktopEvent } from '../shared/desktop-api.js';
 
 const api: DesktopApi = {
+  listSshHosts: () => ipcRenderer.invoke(IPC_CHANNELS.listSshHosts),
+  saveSshHost: (input) => ipcRenderer.invoke(IPC_CHANNELS.saveSshHost, input),
+  deleteSshHost: (input) => ipcRenderer.invoke(IPC_CHANNELS.deleteSshHost, input),
+  probeSshHost: (input) => ipcRenderer.invoke(IPC_CHANNELS.probeSshHost, input),
+  trustSshHostKey: (input) => ipcRenderer.invoke(IPC_CHANNELS.trustSshHostKey, input),
+  testSshHost: (input) => ipcRenderer.invoke(IPC_CHANNELS.testSshHost, input),
+  runSshDiagnostic: (input) => ipcRenderer.invoke(IPC_CHANNELS.runSshDiagnostic, input),
+  cancelSshOperation: (input) => ipcRenderer.invoke(IPC_CHANNELS.cancelSshOperation, input),
   getAppState: () => ipcRenderer.invoke(IPC_CHANNELS.appState),
   getRecentProjects: () => ipcRenderer.invoke(IPC_CHANNELS.recentProjects),
   selectProject: () => ipcRenderer.invoke(IPC_CHANNELS.selectProject),
@@ -17,6 +25,11 @@ const api: DesktopApi = {
   deleteSession: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.deleteSession, sessionId),
   resolveApproval: (input) => ipcRenderer.invoke(IPC_CHANNELS.resolveApproval, input),
   openExternal: (url) => ipcRenderer.invoke(IPC_CHANNELS.openExternal, url),
+  getGitStatus: () => ipcRenderer.invoke(IPC_CHANNELS.gitStatus),
+  getGitDiff: (input) => ipcRenderer.invoke(IPC_CHANNELS.gitDiff, input),
+  stageGitFiles: (paths) => ipcRenderer.invoke(IPC_CHANNELS.gitStage, paths),
+  unstageGitFiles: (paths) => ipcRenderer.invoke(IPC_CHANNELS.gitUnstage, paths),
+  commitGit: (input) => ipcRenderer.invoke(IPC_CHANNELS.gitCommit, input),
   onEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DesktopEvent) => listener(payload);
     ipcRenderer.on(IPC_CHANNELS.event, handler);
@@ -25,4 +38,3 @@ const api: DesktopApi = {
 };
 
 contextBridge.exposeInMainWorld('forgex', api);
-

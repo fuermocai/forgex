@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -14,12 +15,18 @@ import {
   testConnectivity,
 } from '../../../cli/src/runtime/connect-core.js';
 import { redactText } from '../../../../packages/shared/src/utils/redact.js';
-import type { ConnectModelInput, ConnectModelResult, DesktopAppState, DesktopEvent, SessionSummary } from '../shared/desktop-api.js';
+import type { ConnectModelInput, ConnectModelResult, DesktopAppState, DesktopEvent, GitSnapshot, GitStatusResult, SessionSummary } from '../shared/desktop-api.js';
 import { DesktopApprovalBroker } from './desktop-approval-broker.js';
+import { DesktopGitService } from './desktop-git-service.js';
 import { RecentProjectStore } from './recent-project-store.js';
+
+import type { RemoteDiagActionDto, SshHostOperation, SshHostProfile, SshHostProfileInput } from '../shared/desktop-api.js';
+import type { DesktopSshService } from './desktop-ssh-service.js';
+import type { SshHostStore } from './ssh-host-store.js';
 
 export class DesktopRuntime {
   readonly approvals: DesktopApprovalBroker;
+  private readonly git = new DesktopGitService();
   private runtime: ForgeRuntime | null = null;
   private projectPath: string | null = null;
   private workspaceRoot: string | null = null;
@@ -28,9 +35,101 @@ export class DesktopRuntime {
   private activeRun: Promise<void> | null = null;
   private unsubscribeEvents: (() => void) | null = null;
 
-  constructor(private readonly emit: (event: DesktopEvent) => void, private readonly recentProjectStore: RecentProjectStore) {
+  private readonly sshOperations = new Map<string, { hostId: string; controller: AbortController }>();
+  private readonly probedFingerprints = new Map<string, { profile: SshHostProfile; fingerprint: string }>();
+  private closing = false;
+
+  constructor(
+    private readonly emit: (event: DesktopEvent) => void,
+    private readonly recentProjectStore: RecentProjectStore,
+    private readonly sshHosts: SshHostStore,
+    private readonly sshService: DesktopSshService,
+  ) {
     this.approvals = new DesktopApprovalBroker(emit);
     for (const project of recentProjectStore.list()) this.authorizedProjectPaths.add(resolve(project.path));
+  }
+
+  listSshHosts() { return this.sshHosts.list(); }
+
+  private requireHost(id: string): SshHostProfile {
+    const profile = this.sshHosts.list().find((row) => row.id === id);
+    if (!profile) throw new Error('SSH 主机不存在');
+    return profile;
+  }
+
+  private invalidateHost(id: string): void {
+    this.probedFingerprints.delete(id);
+    for (const { hostId, controller } of this.sshOperations.values()) {
+      if (id === hostId) controller.abort(new Error('主机配置已更新，请重试'));
+    }
+  }
+
+  saveSshHost(input: SshHostProfileInput & { id?: string }) {
+    const old = input.id ? this.requireHost(input.id) : undefined;
+    const sameIdentity = old?.host === input.host && old.port === input.port && old.username === input.username;
+    const saved = this.sshHosts.upsert({ ...input, id: old?.id ?? randomUUID(),
+      hostKeyFingerprint: sameIdentity ? old.hostKeyFingerprint : null });
+    this.invalidateHost(saved.id);
+    return saved;
+  }
+
+  deleteSshHost(id: string): void {
+    this.sshHosts.remove(id);
+    this.invalidateHost(id);
+  }
+
+  trustSshHostKey(id: string, fingerprint: string) {
+    const profile = this.requireHost(id);
+    const probe = this.probedFingerprints.get(id);
+    if (!probe || probe.fingerprint !== fingerprint || probe.profile.host !== profile.host
+      || probe.profile.port !== profile.port || probe.profile.username !== profile.username
+      || probe.profile.hostKeyFingerprint !== profile.hostKeyFingerprint) throw new Error('请重新探测并核对主机指纹');
+    const saved = this.sshHosts.upsert({ ...profile, hostKeyFingerprint: fingerprint });
+    this.invalidateHost(id);
+    return saved;
+  }
+
+  probeSshHost(input: SshHostOperation) {
+    this.probedFingerprints.delete(input.id);
+    return this.runSshOperation(input, async (profile, signal) => {
+      const fingerprint = await this.sshService.probeHostKey(profile, signal);
+      signal.throwIfAborted();
+      this.probedFingerprints.set(profile.id, { profile, fingerprint });
+      return { fingerprint };
+    });
+  }
+
+  testSshHost(input: SshHostOperation) {
+    return this.runSshOperation(input, (profile, signal) => this.sshService.testConnection(profile, signal));
+  }
+
+  runSshDiagnostic(input: SshHostOperation, action: RemoteDiagActionDto) {
+    return this.runSshOperation(input, (profile, signal) => this.sshService.diagnose(profile, action, signal));
+  }
+
+  cancelSshOperation(id: string): void {
+    this.sshOperations.get(id)?.controller.abort(new Error('SSH 操作已取消'));
+  }
+
+  private async runSshOperation<T>(input: SshHostOperation, run: (p: SshHostProfile, s: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.closing) throw new Error('窗口正在关闭');
+    if (this.sshOperations.has(input.operationId)) throw new Error('SSH 操作标识已被使用');
+    if (this.sshOperations.size >= 32) throw new Error('SSH 操作过多，请稍后重试');
+    const profile = this.requireHost(input.id);
+    const controller = new AbortController();
+    this.sshOperations.set(input.operationId, { hostId: input.id, controller });
+    const timer = setTimeout(() => controller.abort(new Error('SSH 操作超时')), 45_000);
+    try {
+      const result = await run(profile, controller.signal);
+      controller.signal.throwIfAborted();
+      return result;
+    } catch (err) {
+      controller.signal.throwIfAborted();
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      this.sshOperations.delete(input.operationId);
+    }
   }
 
   authorizeProjectPath(path: string): void {
@@ -201,7 +300,30 @@ export class DesktopRuntime {
     if (!runtime.store.deleteSession(sessionId)) throw new Error('会话已不存在');
   }
 
+  async getGitStatus(): Promise<GitStatusResult> {
+    return this.git.status(await this.requireGitWorkspaceRoot());
+  }
+
+  async getGitDiff(input: { path: string; staged: boolean }): Promise<string> {
+    return this.git.diff(await this.requireGitWorkspaceRoot(), input.path, input.staged);
+  }
+
+  async stageGitFiles(paths: string[]): Promise<void> {
+    await this.git.stage(await this.requireGitWorkspaceRoot(), paths);
+  }
+
+  async unstageGitFiles(paths: string[]): Promise<void> {
+    await this.git.unstage(await this.requireGitWorkspaceRoot(), paths);
+  }
+
+  async commitGit(input: { message: string; snapshot: GitSnapshot }): Promise<{ commit: string }> {
+    return this.git.commit(await this.requireGitWorkspaceRoot(), input.message, input.snapshot);
+  }
+
   async close(): Promise<void> {
+    this.closing = true;
+    this.probedFingerprints.clear();
+    for (const id of this.sshOperations.keys()) this.cancelSshOperation(id);
     await this.closeRuntime();
   }
 
@@ -221,6 +343,20 @@ export class DesktopRuntime {
   private requireRuntime(): ForgeRuntime {
     if (!this.runtime) throw new Error('请先选择项目并启动会话');
     return this.runtime;
+  }
+
+  private async requireGitWorkspaceRoot(): Promise<string> {
+    const { runtime, projectPath, workspaceRoot } = this;
+    if (!runtime || !projectPath || !workspaceRoot) {
+      throw new Error('请先选择本地项目并启动会话');
+    }
+    const root = await realpath(workspaceRoot).catch(() => {
+      throw new Error('无法访问当前项目的工作区');
+    });
+    if (projectPath !== root || this.runtime !== runtime) {
+      throw new Error('Git 工作区必须是当前已授权的项目目录');
+    }
+    return root;
   }
 
   private forwardAgentEvent(event: Parameters<ForgeRuntime['agent']['events']['on']>[0] extends (value: infer E) => void ? E : never): void {
