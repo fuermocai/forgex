@@ -215,6 +215,9 @@ export function GitPanel({ projectPath, api }: GitPanelProps) {
                     const displayPath = renamed ? `${entry.originalPath} → ${entry.path}` : entry.path;
                     const code = id === 'conflicted' ? entry.indexStatus + entry.worktreeStatus : side;
                     const action = id === 'staged' ? '取消暂存' : '暂存';
+                    const actionPaths = side === 'R' && entry.originalPath !== undefined
+                      ? [entry.originalPath, entry.path]
+                      : [entry.path];
                     return <li className="git-file" key={entry.path}>
                       <button type="button" className="git-file-select" aria-pressed={selectedPath === entry.path && mode === groupMode} title={displayPath}
                         onClick={() => setSelection({ path: entry.path, mode: groupMode })}>
@@ -223,8 +226,8 @@ export function GitPanel({ projectPath, api }: GitPanelProps) {
                       </button>
                       {id !== 'conflicted' && <button type="button" className="secondary-button git-file-action" disabled={controlsLocked}
                         aria-label={`${action} ${displayPath}`} onClick={() => void mutate(() => id === 'staged'
-                          ? api.unstageGitFiles([entry.path])
-                          : api.stageGitFiles([entry.path]))}>{action}</button>}
+                          ? api.unstageGitFiles(actionPaths)
+                          : api.stageGitFiles(actionPaths))}>{action}</button>}
                     </li>;
                   })}
                 </ul>

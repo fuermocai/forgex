@@ -227,7 +227,7 @@ export default function App() {
   };
 
   const setupVisible = showSetup || state?.modelConfigured === false;
-  const gitVisible = workspaceView === 'git' && project !== null && !setupVisible;
+  const gitVisible = workspaceView === 'git' && project !== null;
   const mainContent = setupVisible
     ? <SetupScreen state={state} onConnected={() => void onModelConnected()} onCancel={() => setShowSetup(false)} />
     : session
@@ -253,7 +253,10 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <AppearancePicker themeId={themeId} onSelect={selectTheme} />
-          <button className="settings-button" onClick={() => setShowSetup(true)} title="模型设置">模型设置</button>
+          <button className="settings-button" onClick={() => {
+            setWorkspaceView('chat');
+            setShowSetup(true);
+          }} title="模型设置">模型设置</button>
           <span className="version">{state ? `v${state.version}` : ''}</span>
         </div>
       </header>
@@ -279,15 +282,16 @@ export default function App() {
           </div>
         </aside>
         <section className="main-panel">
-          {!setupVisible && <div className="workspace-switch" role="group" aria-label="工作区视图">
+          <div className="workspace-switch" role="group" aria-label="工作区视图">
             <button type="button" aria-pressed={!gitVisible} onClick={() => setWorkspaceView('chat')}>对话</button>
             <button type="button" aria-pressed={gitVisible} onClick={() => setWorkspaceView('git')} disabled={!project || starting}>Git</button>
             {!project && <span>选择本地项目后可使用 Git</span>}
-          </div>}
+          </div>
           <div className="workspace-view" hidden={gitVisible}>{mainContent}</div>
-          {gitVisible && (starting
-            ? <p className="git-feedback" role="status">正在打开项目…</p>
-            : <GitPanel key={project.path} projectPath={project.path} api={window.forgex} />)}
+          {project && !starting && <div className="workspace-view" hidden={!gitVisible}>
+            <GitPanel key={project.path} projectPath={project.path} api={window.forgex} />
+          </div>}
+          {gitVisible && starting && <p className="git-feedback" role="status">正在打开项目…</p>}
         </section>
       </div>
           {approval && <ApprovalDialog key={approval.id} request={approval} queueLength={approvalQueue.length} onResolve={(decision) => void resolveApproval(decision)} />}
