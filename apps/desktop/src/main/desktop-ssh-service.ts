@@ -1,5 +1,5 @@
 import { SshClient } from '../../../../packages/devops/src/ssh/ssh-client.js';
-import { SshGuard } from '../../../../packages/devops/src/ssh/ssh-guard.js';
+import { SSH_PATH_REQUIREMENTS, SSH_PATH_UNAVAILABLE_EXIT, SshGuard } from '../../../../packages/devops/src/ssh/ssh-guard.js';
 import { redactText } from '../../../../packages/shared/src/utils/redact.js';
 import type { RemoteDiagActionDto, SshDiagnosticResult, SshHostProfile } from '../shared/desktop-api.js';
 
@@ -51,13 +51,18 @@ export class DesktopSshService {
 
   async diagnose(profile: SshHostProfile, action: RemoteDiagActionDto, signal: AbortSignal): Promise<SshDiagnosticResult> {
     const spec = { host: guardedHost(profile), action };
+    let result;
     try {
       const guarded = this.guard.validate(spec);
-      const result = await this.client.execute(spec, guarded, signal);
-      if (signal.aborted) throw signal.reason;
-      const { exitCode, truncated, durationMs, timedOut } = result;
-      return { action: action.action, stdout: displayOutput(result.stdout, profile), stderr: displayOutput(result.stderr, profile),
-        exitCode, truncated, durationMs, timedOut };
+      result = await this.client.execute(spec, guarded, signal);
     } catch (err) { throw sshFailure(err); }
+    signal.throwIfAborted();
+    const { exitCode, truncated, durationMs, timedOut } = result;
+    // 126/127 also cover a login shell that cannot invoke /bin/sh for the preflight.
+    if ('path' in action && (exitCode === SSH_PATH_UNAVAILABLE_EXIT || exitCode === 126 || exitCode === 127)) {
+      throw new Error(SSH_PATH_REQUIREMENTS);
+    }
+    return { action: action.action, stdout: displayOutput(result.stdout, profile), stderr: displayOutput(result.stderr, profile),
+      exitCode, truncated, durationMs, timedOut };
   }
 }

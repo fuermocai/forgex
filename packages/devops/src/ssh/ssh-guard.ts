@@ -324,6 +324,13 @@ export class SshGuard {
 /* 辅助函数                                                              */
 /* ------------------------------------------------------------------ */
 
+/** EX_UNAVAILABLE is reserved for a missing remote path-diagnostic prerequisite. */
+export const SSH_PATH_UNAVAILABLE_EXIT = 69;
+export const SSH_PATH_REQUIREMENTS = '远端主机不支持此路径诊断。需要 Linux O_PATH、/proc/self/fd、/bin/sh、Python 3、base64 -d 和相应的诊断命令。';
+
+// ASCII keeps the preflight usable on hosts with a C locale.
+const remoteRequirements = 'Unsupported SSH path diagnostic: requires Linux O_PATH, /proc/self/fd, /bin/sh, Python 3, base64 -d and the diagnostic utilities.';
+
 /** Fixed remote program. Open metadata without touching device/FIFO data or requiring read permission.
  * Each utility operates on the pinned object or the directory selected by fchdir.
  */
@@ -331,8 +338,26 @@ const pathDiagnosticProgram = `
 import base64
 import json
 import os
+import shutil
 import stat
 import sys
+
+def has_prerequisites(request):
+    tools = {"stat_file": ["stat"], "list_dir": ["ls"], "read_remote_log": ["tail"]}[request["action"]]
+    if request.get("depth", 1) > 1:
+        tools.extend(["find", "head"])
+    if request.get("grep"):
+        tools.append("grep")
+    if any(shutil.which(tool) is None for tool in tools):
+        return False
+    try:
+        fd = os.open("/", os.O_PATH | os.O_CLOEXEC)
+        try:
+            return os.readlink("/proc/self/fd/" + str(fd)) == "/"
+        finally:
+            os.close(fd)
+    except (AttributeError, OSError):
+        return False
 
 def inspect_target(request):
     fd = os.open(request["path"], os.O_PATH | os.O_CLOEXEC)
@@ -369,7 +394,11 @@ def inspect_target(request):
         os.close(fd)
 
 try:
-    inspect_target(json.loads(base64.b64decode(sys.argv[1])))
+    request = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
+    if not has_prerequisites(request):
+        print(${JSON.stringify(remoteRequirements)}, file=sys.stderr)
+        sys.exit(${SSH_PATH_UNAVAILABLE_EXIT})
+    inspect_target(request)
 except (AttributeError, OSError, ValueError):
     sys.exit("SSH diagnostic target is unavailable or outside allowed roots")
 `;
@@ -384,7 +413,12 @@ function pathDiagnosticCommand(action: PathDiagnostic): string {
     throw new ForgeError('SSH_ARG_INVALID', '参数包含非法控制字符');
   }
   const payload = Buffer.from(JSON.stringify(action)).toString('base64');
-  const launcher = 'script=$(printf %s "$1" | base64 -d) || exit 1; exec python3 -I -c "$script" "$2"';
+  const launcher = [
+    `unavailable() { echo "${remoteRequirements}" >&2; exit ${SSH_PATH_UNAVAILABLE_EXIT}; }`,
+    'command -v python3 >/dev/null 2>&1 || unavailable',
+    'script=$(printf %s "$1" | base64 -d 2>/dev/null) || unavailable',
+    'exec python3 -I -c "$script" "$2"',
+  ].join('; ');
   return `/bin/sh -c '${launcher}' sh ${pathProgramArgument} ${payload}`;
 }
 
