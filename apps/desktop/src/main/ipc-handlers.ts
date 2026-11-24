@@ -1,7 +1,8 @@
 import { app, dialog, ipcMain, shell, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import { basename } from 'node:path';
 import { IPC_CHANNELS, type ProjectSelection } from '../shared/desktop-api.js';
-import { DesktopRuntime } from './desktop-runtime.js';
+import { isGitCommitMessage, isGitPath, isGitPathList } from './desktop-git-service.js';
+import type { DesktopRuntime } from './desktop-runtime.js';
 
 function assertTrustedSender(event: IpcMainInvokeEvent, owner: BrowserWindow): void {
   if (event.sender !== owner.webContents || event.senderFrame !== owner.webContents.mainFrame) {
@@ -111,6 +112,46 @@ export function registerShellIpcHandlers(owner: BrowserWindow, runtime: DesktopR
     await shell.openExternal(parsed.toString());
   };
 
+  const gitStatus = (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+    assertTrustedSender(event, owner);
+    if (args.length !== 0) {
+      throw new Error('Git 状态请求不接受参数');
+    }
+    return runtime.getGitStatus();
+  };
+
+  const gitDiff = (event: IpcMainInvokeEvent, input: unknown) => {
+    assertTrustedSender(event, owner);
+    if (!isRecord(input) || !isGitPath(input.path) || typeof input.staged !== 'boolean') {
+      throw new Error('Git 差异请求参数无效');
+    }
+    return runtime.getGitDiff({ path: input.path, staged: input.staged });
+  };
+
+  const gitStage = (event: IpcMainInvokeEvent, paths: unknown) => {
+    assertTrustedSender(event, owner);
+    if (!isGitPathList(paths)) {
+      throw new Error('Git 暂存文件列表无效');
+    }
+    return runtime.stageGitFiles(paths);
+  };
+
+  const gitUnstage = (event: IpcMainInvokeEvent, paths: unknown) => {
+    assertTrustedSender(event, owner);
+    if (!isGitPathList(paths)) {
+      throw new Error('Git 取消暂存文件列表无效');
+    }
+    return runtime.unstageGitFiles(paths);
+  };
+
+  const gitCommit = (event: IpcMainInvokeEvent, input: unknown) => {
+    assertTrustedSender(event, owner);
+    if (!isRecord(input) || !isGitCommitMessage(input.message)) {
+      throw new Error('提交说明不能为空、包含空字符或超出长度限制');
+    }
+    return runtime.commitGit({ message: input.message });
+  };
+
   ipcMain.handle(IPC_CHANNELS.appState, appState);
   ipcMain.handle(IPC_CHANNELS.recentProjects, recentProjects);
   ipcMain.handle(IPC_CHANNELS.selectProject, selectProject);
@@ -124,12 +165,18 @@ export function registerShellIpcHandlers(owner: BrowserWindow, runtime: DesktopR
   ipcMain.handle(IPC_CHANNELS.deleteSession, deleteSession);
   ipcMain.handle(IPC_CHANNELS.resolveApproval, resolveApproval);
   ipcMain.handle(IPC_CHANNELS.openExternal, openExternal);
+  ipcMain.handle(IPC_CHANNELS.gitStatus, gitStatus);
+  ipcMain.handle(IPC_CHANNELS.gitDiff, gitDiff);
+  ipcMain.handle(IPC_CHANNELS.gitStage, gitStage);
+  ipcMain.handle(IPC_CHANNELS.gitUnstage, gitUnstage);
+  ipcMain.handle(IPC_CHANNELS.gitCommit, gitCommit);
 
   return () => {
     for (const channel of [IPC_CHANNELS.appState, IPC_CHANNELS.recentProjects, IPC_CHANNELS.selectProject, IPC_CHANNELS.connectModel,
       IPC_CHANNELS.startSession, IPC_CHANNELS.sendMessage, IPC_CHANNELS.cancelTurn, IPC_CHANNELS.listSessions,
       IPC_CHANNELS.sessionMessages, IPC_CHANNELS.renameSession, IPC_CHANNELS.deleteSession,
-      IPC_CHANNELS.resolveApproval, IPC_CHANNELS.openExternal]) {
+      IPC_CHANNELS.resolveApproval, IPC_CHANNELS.openExternal, IPC_CHANNELS.gitStatus,
+      IPC_CHANNELS.gitDiff, IPC_CHANNELS.gitStage, IPC_CHANNELS.gitUnstage, IPC_CHANNELS.gitCommit]) {
       ipcMain.removeHandler(channel);
     }
   };

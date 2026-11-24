@@ -17,6 +17,11 @@ const api: DesktopApi = {
   deleteSession: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.deleteSession, sessionId),
   resolveApproval: (input) => ipcRenderer.invoke(IPC_CHANNELS.resolveApproval, input),
   openExternal: (url) => ipcRenderer.invoke(IPC_CHANNELS.openExternal, url),
+  getGitStatus: () => ipcRenderer.invoke(IPC_CHANNELS.gitStatus),
+  getGitDiff: (input) => ipcRenderer.invoke(IPC_CHANNELS.gitDiff, input),
+  stageGitFiles: (paths) => ipcRenderer.invoke(IPC_CHANNELS.gitStage, paths),
+  unstageGitFiles: (paths) => ipcRenderer.invoke(IPC_CHANNELS.gitUnstage, paths),
+  commitGit: (input) => ipcRenderer.invoke(IPC_CHANNELS.gitCommit, input),
   onEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DesktopEvent) => listener(payload);
     ipcRenderer.on(IPC_CHANNELS.event, handler);

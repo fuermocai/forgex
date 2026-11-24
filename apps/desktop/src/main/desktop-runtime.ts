@@ -14,12 +14,14 @@ import {
   testConnectivity,
 } from '../../../cli/src/runtime/connect-core.js';
 import { redactText } from '../../../../packages/shared/src/utils/redact.js';
-import type { ConnectModelInput, ConnectModelResult, DesktopAppState, DesktopEvent, SessionSummary } from '../shared/desktop-api.js';
+import type { ConnectModelInput, ConnectModelResult, DesktopAppState, DesktopEvent, GitStatusResult, SessionSummary } from '../shared/desktop-api.js';
 import { DesktopApprovalBroker } from './desktop-approval-broker.js';
+import { DesktopGitService } from './desktop-git-service.js';
 import { RecentProjectStore } from './recent-project-store.js';
 
 export class DesktopRuntime {
   readonly approvals: DesktopApprovalBroker;
+  private readonly git = new DesktopGitService();
   private runtime: ForgeRuntime | null = null;
   private projectPath: string | null = null;
   private workspaceRoot: string | null = null;
@@ -201,6 +203,26 @@ export class DesktopRuntime {
     if (!runtime.store.deleteSession(sessionId)) throw new Error('会话已不存在');
   }
 
+  async getGitStatus(): Promise<GitStatusResult> {
+    return this.git.status(await this.requireGitWorkspaceRoot());
+  }
+
+  async getGitDiff(input: { path: string; staged: boolean }): Promise<string> {
+    return this.git.diff(await this.requireGitWorkspaceRoot(), input.path, input.staged);
+  }
+
+  async stageGitFiles(paths: string[]): Promise<void> {
+    await this.git.stage(await this.requireGitWorkspaceRoot(), paths);
+  }
+
+  async unstageGitFiles(paths: string[]): Promise<void> {
+    await this.git.unstage(await this.requireGitWorkspaceRoot(), paths);
+  }
+
+  async commitGit(input: { message: string }): Promise<{ commit: string }> {
+    return this.git.commit(await this.requireGitWorkspaceRoot(), input.message);
+  }
+
   async close(): Promise<void> {
     await this.closeRuntime();
   }
@@ -221,6 +243,20 @@ export class DesktopRuntime {
   private requireRuntime(): ForgeRuntime {
     if (!this.runtime) throw new Error('请先选择项目并启动会话');
     return this.runtime;
+  }
+
+  private async requireGitWorkspaceRoot(): Promise<string> {
+    const { runtime, projectPath, workspaceRoot } = this;
+    if (!runtime || !projectPath || !workspaceRoot) {
+      throw new Error('请先选择本地项目并启动会话');
+    }
+    const root = await realpath(workspaceRoot).catch(() => {
+      throw new Error('无法访问当前项目的工作区');
+    });
+    if (projectPath !== root || this.runtime !== runtime) {
+      throw new Error('Git 工作区必须是当前已授权的项目目录');
+    }
+    return root;
   }
 
   private forwardAgentEvent(event: Parameters<ForgeRuntime['agent']['events']['on']>[0] extends (value: infer E) => void ? E : never): void {

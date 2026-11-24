@@ -12,6 +12,11 @@ export const IPC_CHANNELS = {
   deleteSession: 'forgex:delete-session',
   resolveApproval: 'forgex:resolve-approval',
   openExternal: 'forgex:open-external',
+  gitStatus: 'forgex:git-status',
+  gitDiff: 'forgex:git-diff',
+  gitStage: 'forgex:git-stage',
+  gitUnstage: 'forgex:git-unstage',
+  gitCommit: 'forgex:git-commit',
   event: 'forgex:event',
 } as const;
 
@@ -73,6 +78,24 @@ export interface DesktopApprovalRequest {
   previewMustBeReviewed?: boolean;
 }
 
+/** A Git status entry with independent index and working tree codes. */
+export interface GitFileEntry {
+  path: string;
+  originalPath?: string;
+  indexStatus: string;
+  worktreeStatus: string;
+  conflicted: boolean;
+}
+
+/** Status for the active local repository and its upstream comparison. */
+export interface GitStatusResult {
+  root: string;
+  branch: string;
+  ahead: number;
+  behind: number;
+  entries: GitFileEntry[];
+}
+
 export type DesktopEvent =
   | { type: 'assistant:delta'; text: string }
   | { type: 'assistant:message'; text: string }
@@ -98,6 +121,11 @@ export interface DesktopApi {
   deleteSession(sessionId: string): Promise<void>;
   resolveApproval(input: { approvalId: string; decision: 'approve' | 'reject' }): Promise<void>;
   openExternal(url: string): Promise<void>;
+  getGitStatus(): Promise<GitStatusResult>;
+  getGitDiff(input: { path: string; staged: boolean }): Promise<string>;
+  stageGitFiles(paths: string[]): Promise<void>;
+  unstageGitFiles(paths: string[]): Promise<void>;
+  commitGit(input: { message: string }): Promise<{ commit: string }>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 
